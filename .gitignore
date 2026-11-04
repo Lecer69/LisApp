@@ -1,0 +1,28 @@
+# Rust
+target/
+Cargo.lock
+
+# The built APK, from install.sh
+output/
+
+# Android and Gradle
+build/
+.gradle/
+.kotlin/
+.cxx/
+captures/
+local.properties
+*.apk
+*.aab
+
+# Signing keys
+*.keystore
+*.jks
+keystore.properties
+
+# Editors and tools
+.idea/
+.vscode/
+.claude/
+*.iml
+*.swp
