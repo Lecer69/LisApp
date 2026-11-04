@@ -136,8 +136,8 @@ fn the_plugin_loads_and_a_source_shows_the_stream() {
             let _ = stopped_rx.recv_timeout(Duration::from_secs(10));
         });
 
-        // Hidden for the first half second, so nothing should be decoded
-        wait_for("the rotation", Duration::from_secs(5), |calls| calls.contains(&Call::Rotation(90)));
+        // 90 clockwise in the stream is 270 to OBS. Hidden for the first half second, so nothing should be decoded
+        wait_for("the rotation", Duration::from_secs(5), |calls| calls.contains(&Call::Rotation(270)));
         std::thread::sleep(Duration::from_millis(500));
         assert_eq!(frames(&CALLS.lock().unwrap()), 0, "a hidden source doesn't decode");
 

@@ -7,7 +7,7 @@ pub mod sys;
 
 use decoder::Decoder;
 use lis_video::{read_packet, Packet, CODEC_H264};
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_char, c_long, c_void, CStr};
 use std::io::BufReader;
 use std::mem;
 use std::net::Shutdown;
@@ -92,6 +92,11 @@ fn clear_frame(source: *mut obs_source_t) {
     unsafe { obs_source_output_video2(source, ptr::null()) };
 }
 
+/// The stream counts clockwise, and OBS turns the picture counterclockwise.
+fn obs_rotation(clockwise: u32) -> c_long {
+    ((360 - clockwise % 360) % 360).into()
+}
+
 /// One connection to the daemon, until it ends.
 fn watch(shared: &Shared, stream: UnixStream) {
     let source = shared.source.0;
@@ -110,7 +115,7 @@ fn watch(shared: &Shared, stream: UnixStream) {
                 if info.codec != CODEC_H264 {
                     log(LOG_WARNING, &format!("unknown codec {}", info.codec));
                 }
-                unsafe { obs_source_set_async_rotation(source, info.rotation.into()) };
+                unsafe { obs_source_set_async_rotation(source, obs_rotation(info.rotation)) };
             }
             Packet::Frame(frame) => {
                 // Nothing to show it on, so it saves decoding
@@ -261,4 +266,14 @@ pub extern "C" fn obs_module_load() -> bool {
         obs_register_source_s(&info, mem::size_of::<obs_source_info>());
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clockwise_turns_become_obs_turns() {
+        assert_eq!([0, 90, 180, 270].map(obs_rotation), [0, 270, 180, 90]);
+    }
 }

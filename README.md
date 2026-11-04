@@ -61,11 +61,19 @@ sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp
 
 ## Camera
 
-Video only, 1080p at 60 fps (or 30), H.264 from the phone's hardware encoder.
+Video only, H.264 from the phone's hardware encoder, at 60 fps or 30. It's 1080p unless you choose
+another 16:9 size, from 360p up to 4K, out of those the camera has.
 
 1. In the app, open Camera and press Start. It only runs while that screen is showing, and stops as
    soon as you leave the app or lock the phone.
 2. In OBS, add the **Lis Camera** source.
+
+The picture follows the way the phone is held. **Lock landscape** or **Lock portrait** keeps its
+shape in OBS whatever the phone does. A locked picture still turns over when the phone does, so it
+stays the right way up.
+
+The app says when the camera doesn't offer the frame rate you chose. `adb logcat -s LisCamera` shows
+what it does offer.
 
 It uses its own encrypted connection on the same port, and only a paired phone can send to it. When
 Wi-Fi can't keep up, frames are dropped until the next keyframe rather than the delay growing.

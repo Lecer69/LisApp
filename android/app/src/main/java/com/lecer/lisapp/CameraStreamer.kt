@@ -13,6 +13,7 @@ import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.os.Bundle
 import android.os.Handler
@@ -27,6 +28,31 @@ import androidx.core.content.getSystemService
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import uniffi.lis_ffi.VideoConfig
+
+/** 16:9, largest first. */
+val CAMERA_SIZES = listOf(
+    Size(3840, 2160),
+    Size(2560, 1440),
+    Size(1920, 1080),
+    Size(1280, 720),
+    Size(960, 540),
+    Size(640, 360),
+)
+val DEFAULT_CAMERA_SIZE = Size(1920, 1080)
+
+val Size.label: String
+    get() = if (height == 2160) "4K" else "${height}p"
+
+/** The size asked for, or the next one down when this camera doesn't have it. */
+fun closestSize(sizes: List<Size>, wanted: Size): Size? =
+    sizes.firstOrNull { it.height <= wanted.height } ?: sizes.lastOrNull()
+
+/** Which way round the picture goes in OBS. A locked one still turns over, so it's never upside down. */
+enum class CameraAspect(val label: String) {
+    AUTO("Auto-rotate"),
+    LANDSCAPE("Lock landscape"),
+    PORTRAIT("Lock portrait"),
+}
 
 /** The camera, through the hardware encoder, to the PC. The activity stops it as soon as it leaves the screen. */
 class CameraStreamer(private val context: Context) {
@@ -43,6 +69,11 @@ class CameraStreamer(private val context: Context) {
     private var config: VideoConfig? = null
     private var sensorOrientation = 0
     private var isFront = false
+    @Volatile private var aspect = CameraAspect.AUTO
+    private var phoneDegrees = 0
+    private var portraitDegrees = 0
+    // The sensor's own way up on nearly every phone, so a landscape lock starts unturned
+    private var landscapeDegrees = 270
     private var codecConfig = ByteArray(0)
     private var lastKeyframeRequest = 0L
 
@@ -50,14 +81,41 @@ class CameraStreamer(private val context: Context) {
     private var windowFrames = 0
     private var windowBytes = 0L
 
-    fun start(preview: Surface, front: Boolean, wantedFps: Int) {
+    fun start(preview: Surface, front: Boolean, wantedSize: Size, wantedFps: Int) {
         stop()
         val cameraThread = HandlerThread("LisCamera").also { it.start() }
         thread = cameraThread
         handler = Handler(cameraThread.looper).also { cameraHandler ->
-            cameraHandler.post { open(preview, front, wantedFps, cameraHandler) }
+            cameraHandler.post { open(preview, front, wantedSize, wantedFps, cameraHandler) }
         }
         Lis.update { copy(camera = CameraStatus(running = true, front = front)) }
+    }
+
+    /** Applies at once, including mid stream. */
+    fun setAspect(wanted: CameraAspect) {
+        aspect = wanted
+        handler?.post(::sendRotation)
+    }
+
+    /** What this camera and an encoder can both do. */
+    fun sizes(front: Boolean): List<Size> = try {
+        val map = cameraId(front)
+            ?.let { manager?.getCameraCharacteristics(it) }
+            ?.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+        val offered = map?.getOutputSizes(MediaCodec::class.java).orEmpty()
+        val encoders = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .filter { it.isEncoder && MediaFormat.MIMETYPE_VIDEO_AVC in it.supportedTypes }
+            .mapNotNull { it.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities }
+        CAMERA_SIZES.filter { size -> size in offered && encoders.any { it.isSizeSupported(size.width, size.height) } }
+    } catch (error: CameraAccessException) {
+        Log.w(TAG, "can't read the camera's sizes", error)
+        emptyList()
+    }
+
+    private fun cameraId(front: Boolean): String? {
+        val cameras = manager ?: return null
+        val facing = if (front) CameraMetadata.LENS_FACING_FRONT else CameraMetadata.LENS_FACING_BACK
+        return cameras.cameraIdList.firstOrNull { cameras.getCameraCharacteristics(it)[CameraCharacteristics.LENS_FACING] == facing }
     }
 
     /** Waits for the camera to close, so nothing runs once the app has left the screen. */
@@ -95,58 +153,66 @@ class CameraStreamer(private val context: Context) {
         encoderInput?.release()
         encoderInput = null
         codecConfig = ByteArray(0)
+        config = null
         Lis.client.stopVideo()
     }
 
     /** The fastest range at or below what was asked for, with the steadiest frame rate. */
-    private fun pickFrameRate(characteristics: CameraCharacteristics, wanted: Int): Range<Int>? {
+    private fun pickFrameRate(characteristics: CameraCharacteristics, size: Size, wanted: Int): Range<Int>? {
         val map = characteristics[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP] ?: return null
         val ranges = characteristics[CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES] ?: return null
-        val minFrameTime = map.getOutputMinFrameDuration(MediaCodec::class.java, SIZE)
-        return listOf(wanted, FALLBACK_FPS).firstNotNullOfOrNull { fps ->
-            if (minFrameTime > NANOS_PER_SECOND / fps) {
+        val minFrameTime = map.getOutputMinFrameDuration(MediaCodec::class.java, size)
+        val picked = listOf(wanted, FALLBACK_FPS).firstNotNullOfOrNull { fps ->
+            // Cameras round this up or down, so 60 fps can read as 16666667 ns
+            if (minFrameTime * fps > NANOS_PER_SECOND * FRAME_TIME_SLACK_PERCENT / 100) {
                 null
             } else {
                 ranges.filter { it.upper == fps }.maxByOrNull { it.lower }
             }
         }
+        Log.i(TAG, "$size: $minFrameTime ns a frame at best, ranges ${ranges.toList()}, wanted $wanted, picked $picked")
+        return picked
+    }
+
+    /** Scaled by pixels from what suits 1080p, within what Wi-Fi can be expected to carry. */
+    private fun bitrateFor(size: Size, fps: Int): Int {
+        val at1080p = if (fps > FALLBACK_FPS) BITRATE_60 else BITRATE_30
+        return (at1080p * size.width.toLong() * size.height / PIXELS_1080P).coerceIn(MIN_BITRATE, MAX_BITRATE).toInt()
     }
 
     @SuppressLint("MissingPermission")
-    private fun open(preview: Surface, front: Boolean, wantedFps: Int, cameraHandler: Handler) {
+    private fun open(preview: Surface, front: Boolean, wantedSize: Size, wantedFps: Int, cameraHandler: Handler) {
         try {
             val cameras = manager ?: return fail("This phone has no camera service")
-            val facing = if (front) CameraMetadata.LENS_FACING_FRONT else CameraMetadata.LENS_FACING_BACK
-            val id = cameras.cameraIdList.firstOrNull {
-                cameras.getCameraCharacteristics(it)[CameraCharacteristics.LENS_FACING] == facing
-            } ?: return fail("No ${if (front) "front" else "back"} camera")
+            val id = cameraId(front) ?: return fail("No ${if (front) "front" else "back"} camera")
+            val size = closestSize(sizes(front), wantedSize) ?: return fail("This camera can't record video")
 
             val characteristics = cameras.getCameraCharacteristics(id)
-            val map = characteristics[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP]
-            if (map?.getOutputSizes(MediaCodec::class.java)?.contains(SIZE) != true) {
-                return fail("This camera can't record 1080p")
-            }
-            val range = pickFrameRate(characteristics, wantedFps) ?: return fail("This camera has no usable frame rate")
+            val range = pickFrameRate(characteristics, size, wantedFps)
+                ?: return fail("This camera has no usable frame rate at ${size.label}")
 
             sensorOrientation = characteristics[CameraCharacteristics.SENSOR_ORIENTATION] ?: 0
             isFront = front
             val fps = range.upper
-            val bitrate = if (fps > FALLBACK_FPS) BITRATE_60 else BITRATE_30
+            val bitrate = bitrateFor(size, fps)
             val started = VideoConfig(
-                width = SIZE.width.toUInt(),
-                height = SIZE.height.toUInt(),
+                width = size.width.toUInt(),
+                height = size.height.toUInt(),
                 fps = fps.toUInt(),
                 bitrate = bitrate.toUInt(),
-                rotation = rotationFor(0).toUInt(),
+                rotation = rotationFor(shownDegrees()).toUInt(),
                 camera = if (front) "Front" else "Back",
             )
             config = started
 
-            val input = startEncoder(fps, bitrate, cameraHandler)
+            val input = startEncoder(size, fps, bitrate, cameraHandler)
             encoderInput = input
             Lis.client.startVideo(started)
-            watchOrientation()
-            Lis.update { copy(camera = camera.copy(targetFps = fps)) }
+            watchOrientation(cameraHandler)
+            Lis.update { copy(camera = camera.copy(size = size, targetFps = fps, lowestFps = range.lower)) }
+
+            // A display running slower would hold the camera back, as it waits for preview buffers
+            runCatching { preview.setFrameRate(fps.toFloat(), Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE) }
 
             cameras.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(opened: CameraDevice) {
@@ -169,8 +235,8 @@ class CameraStreamer(private val context: Context) {
         }
     }
 
-    private fun format(fps: Int, bitrate: Int, tuned: Boolean): MediaFormat =
-        MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, SIZE.width, SIZE.height).apply {
+    private fun format(size: Size, fps: Int, bitrate: Int, tuned: Boolean): MediaFormat =
+        MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, size.width, size.height).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
             setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
             setInteger(MediaFormat.KEY_FRAME_RATE, fps)
@@ -188,18 +254,19 @@ class CameraStreamer(private val context: Context) {
         }
 
     /** Encoders differ in what they accept, so it falls back to the plain settings. */
-    private fun startEncoder(fps: Int, bitrate: Int, cameraHandler: Handler): Surface {
+    private fun startEncoder(size: Size, fps: Int, bitrate: Int, cameraHandler: Handler): Surface {
         val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         encoder = codec
         codec.setCallback(encoderCallback, cameraHandler)
         try {
-            codec.configure(format(fps, bitrate, tuned = true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec.configure(format(size, fps, bitrate, tuned = true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         } catch (error: RuntimeException) {
             Log.w(TAG, "the encoder refused the tuned settings", error)
             codec.reset()
             codec.setCallback(encoderCallback, cameraHandler)
-            codec.configure(format(fps, bitrate, tuned = false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            codec.configure(format(size, fps, bitrate, tuned = false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         }
+        Log.i(TAG, "encoder ${codec.name}: $size at $fps fps, $bitrate bps")
         val input = codec.createInputSurface()
         codec.start()
         windowStart = SystemClock.elapsedRealtime()
@@ -215,31 +282,40 @@ class CameraStreamer(private val context: Context) {
         range: Range<Int>,
         cameraHandler: Handler,
     ) {
-        val outputs = listOf(OutputConfiguration(preview), OutputConfiguration(input))
-        val callback = object : CameraCaptureSession.StateCallback() {
-            override fun onConfigured(configured: CameraCaptureSession) {
-                session = configured
-                try {
-                    val request = opened.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                        addTarget(preview)
-                        addTarget(input)
-                        set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
-                    }.build()
-                    configured.setRepeatingRequest(request, null, cameraHandler)
-                } catch (error: CameraAccessException) {
-                    fail("Can't start the camera: ${error.message}")
-                } catch (error: IllegalStateException) {
-                    Log.w(TAG, "the camera closed while starting", error)
+        try {
+            val request = opened.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                addTarget(preview)
+                addTarget(input)
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+                // Stabilizing delays frames, and can cap the frame rate
+                set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+            }.build()
+            val outputs = listOf(OutputConfiguration(preview), OutputConfiguration(input))
+            val callback = object : CameraCaptureSession.StateCallback() {
+                override fun onConfigured(configured: CameraCaptureSession) {
+                    session = configured
+                    try {
+                        configured.setRepeatingRequest(request, null, cameraHandler)
+                    } catch (error: CameraAccessException) {
+                        fail("Can't start the camera: ${error.message}")
+                    } catch (error: IllegalStateException) {
+                        Log.w(TAG, "the camera closed while starting", error)
+                    }
+                }
+
+                override fun onConfigureFailed(configured: CameraCaptureSession) {
+                    fail("This camera can't run this resolution at ${range.upper} fps. Try less.")
                 }
             }
-
-            override fun onConfigureFailed(configured: CameraCaptureSession) {
-                fail("This camera can't run at ${range.upper} fps here. Try 30 fps.")
-            }
+            val setup = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, { cameraHandler.post(it) }, callback)
+            // Many cameras choose their sensor mode here, from the frame rate, and not from later requests
+            setup.sessionParameters = request
+            opened.createCaptureSession(setup)
+        } catch (error: CameraAccessException) {
+            fail("Can't start the camera: ${error.message}")
+        } catch (error: IllegalStateException) {
+            Log.w(TAG, "the camera closed while starting", error)
         }
-        opened.createCaptureSession(
-            SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, { cameraHandler.post(it) }, callback),
-        )
     }
 
     private val encoderCallback = object : MediaCodec.Callback() {
@@ -305,17 +381,36 @@ class CameraStreamer(private val context: Context) {
             (sensorOrientation + deviceDegrees) % FULL_TURN
         }
 
-    private fun watchOrientation() {
+    /** With a lock, only the two ways up in that aspect count, and the last one holds through the others. */
+    private fun shownDegrees(): Int = when (aspect) {
+        CameraAspect.AUTO -> phoneDegrees
+        CameraAspect.LANDSCAPE -> landscapeDegrees
+        CameraAspect.PORTRAIT -> portraitDegrees
+    }
+
+    private fun sendRotation() {
+        val current = config ?: return
+        val rotation = rotationFor(shownDegrees()).toUInt()
+        if (rotation != current.rotation) {
+            val changed = current.copy(rotation = rotation)
+            config = changed
+            Lis.client.updateVideo(changed)
+        }
+    }
+
+    private fun turnedTo(degrees: Int) {
+        phoneDegrees = degrees
+        if (degrees % HALF_TURN == 0) portraitDegrees = degrees else landscapeDegrees = degrees
+        sendRotation()
+    }
+
+    /** Sensor events arrive on the main thread, so they move over to where the rest of this state lives. */
+    private fun watchOrientation(cameraHandler: Handler) {
         val listener = object : OrientationEventListener(context) {
             override fun onOrientationChanged(degrees: Int) {
                 if (degrees == ORIENTATION_UNKNOWN) return
-                val rotation = rotationFor((degrees + 45) / 90 * 90 % FULL_TURN).toUInt()
-                val current = config ?: return
-                if (rotation != current.rotation) {
-                    val changed = current.copy(rotation = rotation)
-                    config = changed
-                    Lis.client.updateVideo(changed)
-                }
+                val nearest = (degrees + 45) / 90 * 90 % FULL_TURN
+                cameraHandler.post { turnedTo(nearest) }
             }
         }
         orientationListener = listener
@@ -324,14 +419,18 @@ class CameraStreamer(private val context: Context) {
 
     private companion object {
         const val TAG = "LisCamera"
-        val SIZE = Size(1920, 1080)
         const val FALLBACK_FPS = 30
-        const val BITRATE_60 = 16_000_000
-        const val BITRATE_30 = 10_000_000
+        const val BITRATE_60 = 16_000_000L
+        const val BITRATE_30 = 10_000_000L
+        const val MIN_BITRATE = 1_500_000L
+        const val MAX_BITRATE = 40_000_000L
+        const val PIXELS_1080P = 1920L * 1080L
         const val KEYFRAME_SECONDS = 1
         const val KEYFRAME_REQUEST_MS = 500L
         const val STATS_EVERY_MS = 1000L
         const val NANOS_PER_SECOND = 1_000_000_000L
+        const val FRAME_TIME_SLACK_PERCENT = 101L
+        const val HALF_TURN = 180
         const val FULL_TURN = 360
         const val STOP_WAIT_SECONDS = 2L
     }

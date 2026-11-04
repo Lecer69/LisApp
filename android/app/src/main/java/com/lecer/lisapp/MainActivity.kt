@@ -31,6 +31,8 @@ class MainActivity : ComponentActivity() {
     private var setup by mutableStateOf(SetupState())
     private var showCamera by mutableStateOf(false)
     private var wantedFps by mutableStateOf(DEFAULT_FPS)
+    private var wantedSize by mutableStateOf(DEFAULT_CAMERA_SIZE)
+    private var aspect by mutableStateOf(CameraAspect.AUTO)
 
     private val camera by lazy { CameraStreamer(applicationContext) }
     private var previewSurface: Surface? = null
@@ -62,12 +64,20 @@ class MainActivity : ComponentActivity() {
                     CameraScreen(
                         state = state,
                         wantedFps = wantedFps,
+                        wantedSize = wantedSize,
+                        aspect = aspect,
                         actions = CameraActions(
                             close = ::closeCamera,
                             start = ::requestCamera,
                             stop = ::stopCamera,
                             switchCamera = ::switchCamera,
                             setFps = { wantedFps = it },
+                            setSize = { wantedSize = it },
+                            setAspect = {
+                                aspect = it
+                                camera.setAspect(it)
+                            },
+                            sizes = camera::sizes,
                             surface = ::onPreviewSurface,
                         ),
                     )
@@ -148,7 +158,7 @@ class MainActivity : ComponentActivity() {
     private fun startCamera(front: Boolean = Lis.state.value.camera.front) {
         val surface = previewSurface ?: return
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        camera.start(surface, front, wantedFps)
+        camera.start(surface, front, wantedSize, wantedFps)
     }
 
     private fun stopCamera() {
