@@ -6,9 +6,11 @@ import android.os.Build
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import uniffi.lis_ffi.ActionButton
 import uniffi.lis_ffi.ClientListener
 import uniffi.lis_ffi.ConnectionState
 import uniffi.lis_ffi.LisClient
+import uniffi.lis_ffi.MediaInfo
 import uniffi.lis_ffi.PairedPc
 import uniffi.lis_ffi.PcStats
 import uniffi.lis_ffi.VideoState
@@ -25,15 +27,37 @@ data class AppState(
     val found: List<FoundPc> = emptyList(),
     val transfer: String? = null,
     val camera: CameraStatus = CameraStatus(),
+    val ringing: Boolean = false,
+    val usbMode: Boolean = false,
+    val media: MediaInfo? = null,
+    val actions: List<ActionButton> = emptyList(),
+    val actionMessage: String? = null,
+    val syncError: String? = null,
+    val pcLocked: Boolean = false,
+    val unlockAvailable: Boolean = false,
+    /** This phone has made its unlock key. Whether the PC approved it shows in `unlockAvailable`. */
+    val unlockKey: Boolean = false,
+    val unlockMessage: String? = null,
 )
 
 /** The one client for the process, and the state the screens and the service read. */
 object Lis {
+    private const val PREFERENCES = "lis"
+    private const val PREFERENCE_USB = "usb_mode"
+    /** Where `adb reverse` puts the PC on this phone. */
+    private const val USB_HOST = "127.0.0.1"
+
     private lateinit var appContext: Context
     private var wantsPairing = false
 
     /** So a camera the PC turned away stops encoding, on the screen that owns it. */
     var onCameraRefused: (() -> Unit)? = null
+
+    /** The PC's challenge reaches the screen that asked for it, which holds the fingerprint prompt. */
+    var onUnlockChallenge: ((String) -> Unit)? = null
+
+    /** That screen can close, with what to tell the person, if anything. */
+    var onUnlockOver: ((String?) -> Unit)? = null
 
     lateinit var client: LisClient
         private set
@@ -45,7 +69,22 @@ object Lis {
         appContext = context.applicationContext
         Notifications.createChannels(appContext)
         client = LisClient(appContext.filesDir.absolutePath, deviceName(appContext), Listener())
+        val usb = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getBoolean(PREFERENCE_USB, false)
+        update { copy(usbMode = usb, unlockKey = Unlocker.hasKey()) }
         refreshPaired()
+        SyncDocs.reloadAll()
+    }
+
+    /** To the paired PC, over the cable or the network. */
+    fun connectToPc() {
+        val pc = client.pairedPc() ?: return
+        client.connect(if (state.value.usbMode) USB_HOST else pc.host, pc.port)
+    }
+
+    fun setUsbMode(on: Boolean) {
+        appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit().putBoolean(PREFERENCE_USB, on).apply()
+        update { copy(usbMode = on) }
+        connectToPc()
     }
 
     private fun deviceName(context: Context): String =
@@ -82,6 +121,7 @@ object Lis {
         client.unpair()
         refreshPaired()
         update { copy(pcStats = null, pcName = null) }
+        SyncDocs.clear()
     }
 
     private class Listener : ClientListener {
@@ -89,7 +129,15 @@ object Lis {
             update { copy(connection = state, pcName = pcName ?: this.pcName) }
             refreshPaired()
             if (state == ConnectionState.UNPAIRED && wantsPairing) startPairing()
-            if (state == ConnectionState.CONNECTED) StatsReporter.sendNow(appContext)
+            if (state == ConnectionState.CONNECTED) {
+                StatsReporter.sendNow(appContext)
+            } else {
+                update { copy(media = null, actions = emptyList(), pcLocked = false, unlockAvailable = false) }
+                MediaRemote.clear(appContext)
+                Notifications.cancelPcLocked(appContext)
+                Notifications.cancelUnlockPrompt(appContext)
+                onUnlockOver?.invoke(null)
+            }
         }
 
         override fun onPairCode(code: String) {
@@ -130,6 +178,61 @@ object Lis {
 
         override fun onVideoViewers(count: UInt) {
             update { copy(camera = camera.copy(viewers = count.toInt())) }
+        }
+
+        override fun onRing(ring: Boolean) {
+            if (ring) Ringer.start(appContext) else Ringer.stop(appContext)
+        }
+
+        override fun onSyncChanged(kind: String) {
+            update { copy(syncError = null) }
+            SyncDocs.reload(kind)
+        }
+
+        override fun onSyncError(kind: String, reason: String) {
+            update { copy(syncError = reason) }
+        }
+
+        override fun onMedia(media: MediaInfo?) {
+            update { copy(media = media) }
+            MediaRemote.update(appContext, media)
+        }
+
+        override fun onMediaArt(data: ByteArray) {
+            MediaRemote.updateArt(appContext, data)
+        }
+
+        override fun onActions(actions: List<ActionButton>) {
+            update { copy(actions = actions) }
+        }
+
+        override fun onActionResult(id: String, ok: Boolean) {
+            val name = state.value.actions.firstOrNull { it.id == id }?.name ?: "That action"
+            update { copy(actionMessage = if (ok) "$name is done" else "$name didn't work") }
+        }
+
+        override fun onUnlockState(locked: Boolean, available: Boolean) {
+            update { copy(pcLocked = locked, unlockAvailable = available) }
+            if (locked && available) {
+                Notifications.showPcLocked(appContext, state.value.paired?.name ?: "Your PC")
+            } else {
+                Notifications.cancelPcLocked(appContext)
+                Notifications.cancelUnlockPrompt(appContext)
+                onUnlockOver?.invoke(null)
+            }
+        }
+
+        override fun onUnlockPrompt() {
+            UnlockActivity.popUp(appContext)
+        }
+
+        override fun onUnlockChallenge(nonce: String) {
+            onUnlockChallenge?.invoke(nonce)
+        }
+
+        override fun onUnlockResult(ok: Boolean, reason: String) {
+            update { copy(unlockMessage = if (ok) "Unlocked" else reason) }
+            onUnlockOver?.invoke(if (ok) null else reason)
         }
     }
 }

@@ -44,6 +44,8 @@ data class CameraStatus(
     val lowestFps: Int = 0,
     val fps: Int = 0,
     val mbps: Float = 0f,
+    /** Sending less than chosen, as the connection can't carry more right now. */
+    val limited: Boolean = false,
     val error: String? = null,
 )
 
@@ -79,7 +81,10 @@ private fun statusText(state: AppState, wantedFps: Int): String {
         !camera.running -> if (state.connection == ConnectionState.CONNECTED) "Stopped" else "Connect to your PC first"
         !camera.live -> "Connecting to the PC…"
         camera.viewers == 0 -> "Live. Add the Lis Camera source in OBS.$note"
-        else -> "Live in OBS · ${camera.size?.label} · ${camera.fps} fps · ${"%.1f".format(camera.mbps)} Mbps.$note"
+        else -> {
+            val limited = if (camera.limited) " (lowered for the connection)" else ""
+            "Live in OBS · ${camera.size?.label} · ${camera.fps} fps · ${"%.1f".format(camera.mbps)} Mbps$limited.$note"
+        }
     }
 }
 

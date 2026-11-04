@@ -52,6 +52,14 @@ class SyncService : Service() {
                 StatsReporter.sendNow(this@SyncService)
             }
         }
+        // Nothing announces a cable being plugged in, and backing off would make it slow to notice
+        scope.launch {
+            while (true) {
+                delay(USB_RETRY_MS)
+                val state = Lis.state.value
+                if (state.usbMode && state.connection != ConnectionState.CONNECTED) Lis.client.reconnectNow()
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -68,14 +76,14 @@ class SyncService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        Lis.client.pairedPc()?.let { pc -> Lis.client.connect(pc.host, pc.port) }
+        Lis.connectToPc()
         return START_STICKY
     }
 
     private fun onFound(found: List<FoundPc>) {
         Lis.update { copy(found = found) }
         val paired = Lis.client.pairedPc() ?: return
-        if (Lis.state.value.connection == ConnectionState.CONNECTED) return
+        if (Lis.state.value.connection == ConnectionState.CONNECTED || Lis.state.value.usbMode) return
         // The PC's address can change; its certificate doesn't
         found.firstOrNull { paired.fingerprint.startsWith(it.fingerprintStart) }?.let { pc ->
             Lis.client.connect(pc.host, pc.port.toUShort())
@@ -92,6 +100,7 @@ class SyncService : Service() {
     companion object {
         private const val TAG = "LisSync"
         private const val STATS_EVERY_MS = 60_000L
+        private const val USB_RETRY_MS = 5_000L
 
         fun start(context: Context) {
             try {

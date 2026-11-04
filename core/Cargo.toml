@@ -7,6 +7,7 @@ edition.workspace = true
 hex = "0.4.3"
 lis-video = { version = "0.1.0", path = "../video" }
 rand = "0.10.3"
+ring = "0.17.14"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 serde = { version = "1.0.229", features = ["derive"] }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const DEFAULT_PORT: u16 = 47420;
 pub const SERVICE_TYPE: &str = "_lisapp._tcp.local.";
 pub const CHUNK_LEN: usize = 64 * 1024;
@@ -41,6 +41,35 @@ pub struct FileOffer {
     pub size: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct MediaState {
+    pub player: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub playing: bool,
+    pub position_ms: u64,
+    pub length_ms: u64,
+    pub volume_percent: u8,
+    pub muted: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaAction {
+    PlayPause,
+    Next,
+    Previous,
+    SetVolume { percent: u8 },
+}
+
+/// A button on the phone. Its command stays on the PC.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ActionInfo {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Message {
@@ -63,6 +92,35 @@ pub enum Message {
     FileDone { id: u64 },
     FileAbort { id: u64 },
     FileAck { id: u64, ok: bool },
+    RingPhone { ring: bool },
+    PhoneRinging { ringing: bool },
+    /// The PC's copy of a document, whenever it changes.
+    SyncDoc { kind: String, rev: String, doc: serde_json::Value },
+    /// The phone's merged copy, taken only if the PC's is still `based_on`.
+    SyncPush { kind: String, based_on: String, doc: serde_json::Value },
+    SyncRejected { kind: String, reason: String },
+    MediaState(MediaState),
+    MediaGone,
+    /// Hex of the cover image, empty for none.
+    MediaArt { data: String },
+    MediaControl { action: MediaAction },
+    Actions { actions: Vec<ActionInfo> },
+    RunAction { id: String },
+    ActionResult { id: String, ok: bool },
+    /// Hex of an X.509 P-256 key, which signs only after the phone's biometric check.
+    UnlockKey { public_key: String },
+    /// The phone deleted its key.
+    UnlockRevoke,
+    UnlockState { locked: bool, available: bool },
+    /// Someone is at the locked PC: show the fingerprint prompt without being asked.
+    UnlockPrompt,
+    UnlockRequest,
+    UnlockChallenge { nonce: String },
+    UnlockResponse { nonce: String, signature: String },
+    UnlockResult { ok: bool, reason: String },
+    /// From a newer version of the other device. Ignored, so it doesn't end the connection.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Message {
@@ -166,6 +224,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_messages_round_trip() {
+        let doc = serde_json::json!({ "tasks": [{ "id": 1_730_000_000_000u64, "text": "سلام" }] });
+        for message in [
+            Message::RingPhone { ring: true },
+            Message::SyncDoc { kind: "todo".into(), rev: "ab".into(), doc: doc.clone() },
+            Message::SyncPush { kind: "todo".into(), based_on: "ab".into(), doc },
+            Message::MediaState(MediaState { title: "A \"song\"".into(), volume_percent: 52, ..Default::default() }),
+            Message::MediaGone,
+            Message::MediaControl { action: MediaAction::SetVolume { percent: 40 } },
+            Message::MediaControl { action: MediaAction::PlayPause },
+            Message::Actions { actions: vec![ActionInfo { id: "a".into(), name: "Main scene".into() }] },
+            Message::UnlockRequest,
+            Message::UnlockResponse { nonce: "n".into(), signature: "s".into() },
+        ] {
+            let frame = Frame::Message(message);
+            assert_eq!(round_trip(frame.clone()).await, frame);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_message_from_a_newer_version_is_only_ignored() {
+        let payload = br#"{"t":"something_new","field":[1,2,3]}"#;
+        let mut bytes = vec![KIND_MESSAGE];
+        bytes.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(payload);
+        assert_eq!(read_frame(&mut bytes.as_slice()).await.unwrap(), Frame::Message(Message::Unknown));
+        assert!(!Message::Unknown.allowed_unpaired());
+    }
+
+    #[tokio::test]
     async fn oversized_lengths_are_refused_before_allocating() {
         let mut bytes = vec![KIND_MESSAGE];
         bytes.extend_from_slice(&u32::MAX.to_be_bytes());
@@ -194,6 +282,9 @@ mod tests {
         assert!(!Message::Unpair.allowed_unpaired());
         assert!(!Message::PhoneStats(PhoneStats::default()).allowed_unpaired());
         assert!(!Message::FileAccept { id: 1 }.allowed_unpaired());
+        assert!(!Message::UnlockRequest.allowed_unpaired());
+        assert!(!Message::RunAction { id: "a".into() }.allowed_unpaired());
+        assert!(!Message::SyncPush { kind: "todo".into(), based_on: String::new(), doc: serde_json::Value::Null }.allowed_unpaired());
         assert!(Message::Ping.allowed_unpaired());
     }
 }

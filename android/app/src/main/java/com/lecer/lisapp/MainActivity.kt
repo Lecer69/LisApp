@@ -2,12 +2,14 @@ package com.lecer.lisapp
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
@@ -26,6 +28,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
 import androidx.core.content.getSystemService
 import androidx.core.net.toUri
+import java.security.GeneralSecurityException
 
 class MainActivity : ComponentActivity() {
     private var setup by mutableStateOf(SetupState())
@@ -33,6 +36,7 @@ class MainActivity : ComponentActivity() {
     private var wantedFps by mutableStateOf(DEFAULT_FPS)
     private var wantedSize by mutableStateOf(DEFAULT_CAMERA_SIZE)
     private var aspect by mutableStateOf(CameraAspect.AUTO)
+    private var page by mutableStateOf<OrganizerPage?>(null)
 
     private val camera by lazy { CameraStreamer(applicationContext) }
     private var previewSurface: Surface? = null
@@ -83,6 +87,11 @@ class MainActivity : ComponentActivity() {
                     )
                     return@LisTheme
                 }
+                page?.let { open ->
+                    BackHandler { closePage() }
+                    OrganizerScreen(open, ::closePage)
+                    return@LisTheme
+                }
                 LisScreen(
                     state = state,
                     setup = setup,
@@ -92,6 +101,17 @@ class MainActivity : ComponentActivity() {
                         lockPc = { Lis.client.lockPc() },
                         sendFile = { pickFiles.launch(arrayOf("*/*")) },
                         openCamera = ::openCamera,
+                        openPage = { page = it },
+                        stopRinging = { Ringer.stop(this) },
+                        setUsb = Lis::setUsbMode,
+                        mediaCommand = { Lis.client.mediaCommand(it) },
+                        setVolume = { Lis.client.mediaSetVolume(it.toUByte()) },
+                        runAction = { Lis.client.runAction(it) },
+                        unlockPc = ::unlockPc,
+                        turnOnUnlock = ::turnOnUnlock,
+                        turnOffUnlock = ::turnOffUnlock,
+                        allowPopUp = ::allowPopUp,
+                        openHyperOsPermissions = ::openHyperOsPermissions,
                         unpair = {
                             Lis.unpair()
                             refreshSetup()
@@ -116,11 +136,42 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         refreshSetup()
         SyncService.start(this)
+        SyncDocs.checkDay()
+    }
+
+    private fun closePage() {
+        SyncDocs.flushAll()
+        page = null
+    }
+
+    private fun unlockPc() {
+        startActivity(UnlockActivity.intent(this))
+    }
+
+    private fun turnOnUnlock() {
+        val problem = Unlocker.problem(this)
+        if (problem != null) {
+            Lis.update { copy(unlockMessage = problem) }
+            return
+        }
+        try {
+            Lis.client.unlockEnroll(Unlocker.publicKey())
+            Lis.update { copy(unlockKey = true, unlockMessage = "Now approve this phone on the PC: Settings, Phone Sync") }
+        } catch (error: GeneralSecurityException) {
+            Lis.update { copy(unlockMessage = "Can't make the key: ${error.message}") }
+        }
+    }
+
+    private fun turnOffUnlock() {
+        Unlocker.deleteKey()
+        Lis.client.unlockRevoke()
+        Lis.update { copy(unlockKey = false, unlockMessage = null) }
     }
 
     /** The camera never runs off screen. Without a paired PC, there's nothing to stay connected for. */
     override fun onStop() {
         stopCamera()
+        SyncDocs.flushAll()
         super.onStop()
         if (Lis.client.pairedPc() == null && !isChangingConfigurations) {
             Lis.client.disconnect()
@@ -193,7 +244,27 @@ class MainActivity : ComponentActivity() {
         setup = SetupState(
             notifications = granted(Manifest.permission.POST_NOTIFICATIONS),
             background = getSystemService<PowerManager>()?.isIgnoringBatteryOptimizations(packageName) == true,
+            popUp = canOpenFullScreen() && Settings.canDrawOverlays(this),
+            hyperOs = Build.MANUFACTURER.equals("Xiaomi", ignoreCase = true),
         )
+    }
+
+    private fun canOpenFullScreen(): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
+            getSystemService<NotificationManager>()?.canUseFullScreenIntent() == true
+
+    /** One at a time, as these are separate pages of Android's settings. */
+    private fun allowPopUp() {
+        val page = if (canOpenFullScreen()) Settings.ACTION_MANAGE_OVERLAY_PERMISSION else Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT
+        if (!tryOpen(Intent(page, "package:$packageName".toUri()))) openAppSettings()
+    }
+
+    /** HyperOS's own list, with its "pop-up windows while in the background" and "lock screen" permissions. */
+    private fun openHyperOsPermissions() {
+        val editor = Intent("miui.intent.action.APP_PERM_EDITOR")
+            .setClassName("com.miui.securitycenter", "com.miui.permcenter.permissions.PermissionsEditorActivity")
+            .putExtra("extra_pkgname", packageName)
+        if (!tryOpen(editor)) openAppSettings()
     }
 
     private fun askNotifications() {

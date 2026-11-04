@@ -6,7 +6,7 @@
 //! cargo run -p lis-daemon --example fake_phone -- [host] [port] [test.h264]
 
 use lis_core::video::h264::split_access_units;
-use lis_ffi::{ClientListener, ConnectionState, LisClient, PcStats, PhoneStats, VideoConfig, VideoState};
+use lis_ffi::{ActionButton, ClientListener, ConnectionState, LisClient, MediaInfo, PcStats, PhoneStats, VideoConfig, VideoState};
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -23,6 +23,40 @@ fn client() -> &'static LisClient {
 struct Listener;
 
 impl ClientListener for Listener {
+    fn on_ring(&self, ring: bool) {
+        println!("ring: {ring}");
+        client().report_ringing(ring);
+    }
+    fn on_sync_changed(&self, kind: String) {
+        println!("{kind}: {}", client().sync_doc(kind.clone()));
+    }
+    fn on_sync_error(&self, kind: String, reason: String) {
+        println!("{kind} didn't sync: {reason}");
+    }
+    fn on_media(&self, media: Option<MediaInfo>) {
+        println!("media: {media:?}");
+    }
+    fn on_media_art(&self, data: Vec<u8>) {
+        println!("media art: {} bytes", data.len());
+    }
+    fn on_actions(&self, actions: Vec<ActionButton>) {
+        println!("actions: {actions:?}");
+    }
+    fn on_action_result(&self, id: String, ok: bool) {
+        println!("action {id}: {ok}");
+    }
+    fn on_unlock_state(&self, locked: bool, available: bool) {
+        println!("pc locked: {locked}, can unlock: {available}");
+    }
+    fn on_unlock_prompt(&self) {
+        println!("unlock prompt");
+    }
+    fn on_unlock_challenge(&self, nonce: String) {
+        println!("unlock challenge: {nonce}");
+    }
+    fn on_unlock_result(&self, ok: bool, reason: String) {
+        println!("unlock: {ok} {reason}");
+    }
     fn on_state(&self, state: ConnectionState, pc_name: Option<String>) {
         println!("state: {state:?} {}", pc_name.unwrap_or_default());
         if state == ConnectionState::Unpaired {

@@ -5,5 +5,7 @@ pub mod names;
 pub mod pairing;
 pub mod protocol;
 pub mod session;
+pub mod sync;
 pub mod tls;
+pub mod unlock;
 pub mod video;

@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -22,11 +24,15 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -37,6 +43,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import uniffi.lis_ffi.ConnectionState
+import uniffi.lis_ffi.MediaCommand
+import uniffi.lis_ffi.MediaInfo
 import uniffi.lis_ffi.PcStats
 
 private const val DEFAULT_PORT = 47420
@@ -44,6 +52,8 @@ private const val DEFAULT_PORT = 47420
 data class SetupState(
     val notifications: Boolean = true,
     val background: Boolean = true,
+    val popUp: Boolean = true,
+    val hyperOs: Boolean = false,
 )
 
 class ScreenActions(
@@ -52,6 +62,17 @@ class ScreenActions(
     val lockPc: () -> Unit,
     val sendFile: () -> Unit,
     val openCamera: () -> Unit,
+    val openPage: (OrganizerPage) -> Unit,
+    val stopRinging: () -> Unit,
+    val setUsb: (Boolean) -> Unit,
+    val mediaCommand: (MediaCommand) -> Unit,
+    val setVolume: (Int) -> Unit,
+    val runAction: (String) -> Unit,
+    val unlockPc: () -> Unit,
+    val turnOnUnlock: () -> Unit,
+    val turnOffUnlock: () -> Unit,
+    val allowPopUp: () -> Unit,
+    val openHyperOsPermissions: () -> Unit,
     val unpair: () -> Unit,
     val askNotifications: () -> Unit,
     val askBackground: () -> Unit,
@@ -187,13 +208,22 @@ private fun HomeScreen(state: AppState, setup: SetupState, actions: ScreenAction
         ConnectionState.CONNECTING -> "Connecting…"
         ConnectionState.UNPAIRED -> "The PC no longer recognises this phone. Unpair and pair again."
         ConnectionState.WRONG_PC -> "Another device answered at this address, so nothing was sent to it"
-        ConnectionState.DISCONNECTED -> "Looking for the PC…"
+        ConnectionState.DISCONNECTED -> if (state.usbMode) "Waiting for the USB cable…" else "Looking for the PC…"
     }
     val connected = state.connection == ConnectionState.CONNECTED
 
     Title(name, status)
 
+    if (state.ringing) {
+        Button(onClick = actions.stopRinging, modifier = Modifier.fillMaxWidth()) { Text("Stop ringing") }
+    }
+    if (connected && state.pcLocked && state.unlockAvailable) {
+        Button(onClick = actions.unlockPc, modifier = Modifier.fillMaxWidth()) { Text("Unlock PC") }
+    }
+    state.unlockMessage?.let { Secondary(it) }
+
     state.pcStats?.takeIf { connected }?.let { PcFigures(it) }
+    state.media?.takeIf { connected }?.let { MediaCard(it, actions) }
 
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
         Button(
@@ -213,7 +243,18 @@ private fun HomeScreen(state: AppState, setup: SetupState, actions: ScreenAction
     }
     state.transfer?.let { Secondary(it) }
 
-    SetupList(setup, actions)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        OrganizerPage.entries.forEach { page ->
+            OutlinedButton(onClick = { actions.openPage(page) }, modifier = Modifier.weight(1f)) { Text(page.title) }
+        }
+    }
+    state.syncError?.let { Text(it, fontSize = 14.sp, color = MaterialTheme.colorScheme.error) }
+
+    if (connected && state.actions.isNotEmpty()) ActionButtons(state, actions)
+
+    UsbCard(state, actions)
+
+    SetupList(state, setup, actions)
 
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     UnpairButton(name, actions.unpair)
@@ -225,6 +266,64 @@ private fun PcFigures(stats: PcStats) {
         Figure("CPU", "${stats.cpuPercent.toInt()}%")
         Figure("Memory", "${gigabytes(stats.memoryUsed)} / ${gigabytes(stats.memoryTotal)}")
         Figure("Up", duration(stats.uptimeSecs))
+    }
+}
+
+@Composable
+private fun MediaCard(media: MediaInfo, actions: ScreenActions) {
+    Card {
+        Text(media.title, fontSize = 15.sp, maxLines = 2)
+        if (media.artist.isNotEmpty()) Secondary(media.artist)
+        Spacer(Modifier.height(4.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedButton(onClick = { actions.mediaCommand(MediaCommand.PREVIOUS) }, modifier = Modifier.weight(1f)) { Text("Previous") }
+            Button(onClick = { actions.mediaCommand(MediaCommand.PLAY_PAUSE) }, modifier = Modifier.weight(1f)) {
+                Text(if (media.playing) "Pause" else "Play")
+            }
+            OutlinedButton(onClick = { actions.mediaCommand(MediaCommand.NEXT) }, modifier = Modifier.weight(1f)) { Text("Next") }
+        }
+        VolumeSlider(media, actions.setVolume)
+    }
+}
+
+/** Only sent once let go, and follows the PC otherwise. */
+@Composable
+private fun VolumeSlider(media: MediaInfo, setVolume: (Int) -> Unit) {
+    var dragged by remember { mutableFloatStateOf(-1f) }
+    val percent = media.volumePercent.toInt()
+    LaunchedEffect(percent) { dragged = -1f }
+    val shown = if (dragged >= 0f) dragged else percent.toFloat()
+    Figure("Volume", if (media.muted) "Muted" else "${shown.toInt()}%")
+    Slider(
+        value = shown,
+        onValueChange = { dragged = it },
+        onValueChangeFinished = { setVolume(dragged.toInt()) },
+        valueRange = 0f..100f,
+    )
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ActionButtons(state: AppState, actions: ScreenActions) {
+    SectionLabel("Actions")
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        state.actions.forEach { action ->
+            OutlinedButton(onClick = { actions.runAction(action.id) }) { Text(action.name) }
+        }
+    }
+    state.actionMessage?.let { Secondary(it) }
+}
+
+@Composable
+private fun UsbCard(state: AppState, actions: ScreenActions) {
+    Card {
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Use the USB cable", fontSize = 15.sp)
+                Secondary("Steadier for the camera, and charges the phone. Needs USB debugging on, and USB connection on in the PC's Phone Sync settings.")
+            }
+            Switch(checked = state.usbMode, onCheckedChange = actions.setUsb)
+        }
     }
 }
 
@@ -250,8 +349,39 @@ private fun duration(seconds: ULong): String {
 }
 
 @Composable
-private fun SetupList(setup: SetupState, actions: ScreenActions) {
+private fun SetupList(state: AppState, setup: SetupState, actions: ScreenActions) {
     SectionLabel("Setup")
+    if (state.unlockKey) {
+        SetupItem(
+            "Fingerprint unlock is on",
+            "If it isn't offered when the PC locks, approve this phone in the PC's Phone Sync settings. The PC asks for its password once after every boot.",
+            "Turn off",
+            actions.turnOffUnlock,
+        )
+        if (!setup.popUp) {
+            SetupItem(
+                "Let the fingerprint prompt pop up",
+                "So it can appear by itself when you lock the PC or press a key at its lock screen. There are two settings to allow, so press this again after the first.",
+                "Allow",
+                actions.allowPopUp,
+            )
+        }
+        if (setup.hyperOs) {
+            SetupItem(
+                "Pop-ups on HyperOS",
+                "Also allow \"Display pop-up windows while running in the background\" and \"Show on Lock screen\", or HyperOS only shows a banner.",
+                "Open",
+                actions.openHyperOsPermissions,
+            )
+        }
+    } else {
+        SetupItem(
+            "Unlock the PC with your fingerprint",
+            "A key in this phone's secure hardware signs only after your fingerprint. You approve it on the PC once.",
+            "Turn on",
+            actions.turnOnUnlock,
+        )
+    }
     if (!setup.notifications) {
         SetupItem("Allow notifications", "To show the connection and finished transfers.", "Allow", actions.askNotifications)
     }
@@ -291,7 +421,7 @@ private fun UnpairButton(name: String, unpair: () -> Unit) {
         AlertDialog(
             onDismissRequest = { asking = false },
             title = { Text("Unpair from $name?") },
-            text = { Text("You'd need to pair again to reconnect.") },
+            text = { Text("You'd need to pair again to reconnect. The todos, notes and goals on this phone are removed; the PC keeps its own.") },
             confirmButton = {
                 TextButton(onClick = {
                     asking = false

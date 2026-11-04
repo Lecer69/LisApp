@@ -2,4 +2,8 @@
     <style name="Theme.Lis" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">#0f0f0f</item>
     </style>
+    <style name="Theme.Lis.Unlock" parent="android:Theme.Translucent.NoTitleBar">
+        <item name="android:windowAnimationStyle">@null</item>
+        <item name="android:backgroundDimEnabled">false</item>
+    </style>
 </resources>

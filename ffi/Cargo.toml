@@ -11,6 +11,7 @@ name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
 [dependencies]
+hex = "0.4.3"
 lis-core = { version = "0.1.0", path = "../core" }
 lis-video = { version = "0.1.0", path = "../video" }
 serde = { version = "1.0.229", features = ["derive"] }

@@ -1,8 +1,10 @@
 # Lis App
 
-Connects an Android phone to a lis desktop over the local network: phone
-stats on the PC, files both ways, locking the PC from the phone, and the phone's
-camera as an OBS source. It replaces KDE Connect and DroidCam for these.
+Connects an Android phone to a lis desktop over the local network or a USB cable: phone stats and
+battery alerts on the PC, files both ways, locking and unlocking the PC from the phone, finding the
+phone, the shell's todos, notes and goals on the phone, the PC's media on the phone's lock screen,
+action buttons, and the phone's camera as an OBS source. It replaces KDE Connect and DroidCam for
+these.
 
 ## Layout
 
@@ -15,7 +17,8 @@ obs-plugin/  Rust: the "Lis Camera" source for OBS
 android/   Kotlin and Compose: the system hooks and the screens
 ```
 
-The shell side lives in the lis config: `phone/` and `settings/pages/PhonePage.qml`.
+The shell side lives in the lis config: `phone/`, `settings/pages/PhonePage.qml`, and the services
+that keep todos, notes and goals.
 
 ## Security
 
@@ -29,6 +32,16 @@ The shell side lives in the lis config: `phone/` and `settings/pages/PhonePage.q
   data is dropped.
 - Keys on the PC are readable only by your user.
 - File names from the other device are reduced to a plain name, and nothing is overwritten.
+- Action buttons send only an id. Their commands stay on the PC and never reach the phone, so a paired
+  phone can't run anything else. They do run while the PC is locked, so don't add one you wouldn't
+  want a stolen phone to press.
+- Unlocking takes a signature, over a one-time challenge from the PC, from a key in the phone's secure
+  hardware that signs only right after a strong biometric check, and stops working if a fingerprint
+  is added. So neither the app's files nor the pairing key can unlock the PC. The key has to be
+  approved on the PC, which only someone at the unlocked PC can do. The first unlock after a boot
+  always takes the password, and so does the next one after 3 wrong signatures. The daemon's socket
+  has no command that unlocks, though a program already running as your user could still impersonate
+  the daemon to the shell.
 
 ## Build
 
@@ -59,6 +72,84 @@ sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp
 3. Check that both show the same code, and accept on both.
 4. In the app's Setup list, allow notifications, background use and Autostart.
 
+## Find my phone
+
+**Find Phone** in the shell's Phone panel rings it as an alarm, at full volume and with vibration,
+which sounds even on silent. It stops from the phone or the panel, or by itself after a minute. Total
+silence Do Not Disturb can still mute alarms.
+
+The PC notifies you once when the phone's battery falls to 20% and to 10%, and when it's charged to
+100%.
+
+## Todos, notes and goals
+
+These are the shell's own files, `todo.json`, `notes.json` and `goals.json` in `~/.config/lis`, so the
+phone and the shell show the same things. The phone keeps a copy and works without the PC. Changes go
+out within a second or two of a save, and catch up on reconnecting.
+
+The shell's data has no edit times, so both sides are compared to the last copy they agreed on, item
+by item. Changes to different items or fields all survive. If both changed the same field, the PC's
+copy wins, except that a note rewritten on both keeps its older version as a copy named "(conflict)".
+An item deleted on one side and edited on the other stays. A save in the shell that lands within a
+few microseconds of one from the phone can still lose to it, as the shell's saves take no locks.
+
+Before each change from a phone, the daemon keeps the old file in
+`~/.local/share/lis-app/sync-backups`, the last 10 of each. A file over about 900 KB doesn't sync, and
+the app says so. Unpairing removes the phone's copies and leaves the PC's.
+
+Reordering and restoring from the trash are only in the shell. A private note is covered on the phone
+as in the shell, which isn't encryption.
+
+## Media
+
+What's playing on the PC shows on the phone's lock screen and on the app's home screen, with play and
+pause, next, previous and volume. It uses `playerctl` and `wpctl`, and `curl` for cover art from the
+web. Any player that supports MPRIS works. While it shows, the phone's volume buttons turn the PC's
+volume, as with a Chromecast.
+
+## Action buttons
+
+Add them in the shell: Settings, Phone Sync, Phone Actions. Each is a name and a command, run with
+`sh` as your user. They're also in `~/.config/lis/phone-actions.json`, to edit by hand.
+
+`lis-daemon obs` controls OBS, for buttons like these. It reads the address and password from OBS's
+settings, once its server is on: in OBS, Tools, WebSocket Server Settings.
+
+```sh
+~/.local/bin/lis-daemon obs scene "Main"
+~/.local/bin/lis-daemon obs record
+~/.local/bin/lis-daemon obs stream
+~/.local/bin/lis-daemon obs scenes   # lists them
+```
+
+## USB
+
+A cable is steadier than Wi-Fi for the camera, and charges the phone. It needs `adb`, and USB debugging
+on the phone.
+
+1. In the shell: Settings, Phone Sync, turn on **Use the USB cable**. This keeps `adb reverse` set up.
+2. In the app: turn on **Use the USB cable**.
+
+The phone reaches the PC through the tunnel, and the same certificates are checked as over Wi-Fi. With
+it on, the app doesn't go looking on the network, so turn it off to go back to Wi-Fi.
+
+## Phone unlock
+
+1. In the app's Setup list: **Unlock the PC with your fingerprint**.
+2. In the shell: Settings, Phone Sync, Phone Unlock, **Allow**.
+
+Then the fingerprint prompt pops up on the phone when you lock the PC by hand, and when you press a key
+at its lock screen, as that first prompt will be long gone when you come back. It doesn't when the PC
+locks itself after being idle, or when you lock it from the phone, and it stays away for 20 seconds
+after you dismiss it. While the camera is running it won't cover the picture.
+
+For it to pop up, allow what the app's Setup list asks for: Android's full-screen and draw-over
+permissions, and on HyperOS its own pop-up and lock screen ones. Without them the phone shows a banner to
+tap. The "PC is locked" notification and the **Unlock PC** button in the app also bring up the prompt.
+
+The PC notifies you each time it's unlocked this way. The keyring stays as it was, which is why the first
+unlock after a boot takes the password.
+
 ## Camera
 
 Video only, H.264 from the phone's hardware encoder, at 60 fps or 30. It's 1080p unless you choose
@@ -76,7 +167,8 @@ The app says when the camera doesn't offer the frame rate you chose. `adb logcat
 what it does offer.
 
 It uses its own encrypted connection on the same port, and only a paired phone can send to it. When
-Wi-Fi can't keep up, frames are dropped until the next keyframe rather than the delay growing.
+the connection can't keep up, the bitrate drops until it can, climbing back once it's been clear for a
+while. If frames still pile up, they're dropped until the next keyframe rather than the delay growing.
 
 ## Test
 
@@ -84,8 +176,8 @@ Wi-Fi can't keep up, frames are dropped until the next keyframe rather than the 
 cargo test
 ```
 
-The tests run real TLS on localhost and the real daemon binary, with `hyprctl` and `notify-send`
-stubbed. `cargo run -p lis-daemon --example fake_phone` stands in for the phone while working on
+The tests run real TLS on localhost and the real daemon binary, with the tools it runs, like
+`hyprctl`, `notify-send` and `playerctl`, stubbed. `cargo run -p lis-daemon --example fake_phone` stands in for the phone while working on
 the PC side, and can loop a video file as the camera; its header has the command that makes one.
 
 `cargo test -p lis-camera` tests the plugin by loading it through libobs, with no OBS window or

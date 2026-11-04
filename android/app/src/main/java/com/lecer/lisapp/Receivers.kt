@@ -4,6 +4,13 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 
+/** The Stop button on the ringing notification. */
+class StopRingReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        Ringer.stop(context)
+    }
+}
+
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED && Lis.client.pairedPc() != null) {

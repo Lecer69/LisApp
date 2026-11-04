@@ -112,6 +112,40 @@ async fn run(request: &Value, daemon: &Daemon) -> Result<Value, String> {
             daemon.send_file(fingerprint, text("path").ok_or("No path")?).await?;
             Ok(Value::Null)
         }
+        "ring_phone" => {
+            daemon.ring_phone(fingerprint, request.get("ring").and_then(Value::as_bool).unwrap_or(true))?;
+            Ok(Value::Null)
+        }
+        "usb_mode" => {
+            daemon.set_usb(request.get("enabled").and_then(Value::as_bool).ok_or("No answer")?).await;
+            Ok(Value::Null)
+        }
+        "actions_set" => {
+            let actions = request.get("actions").cloned().ok_or("No actions")?;
+            let actions = serde_json::from_value(actions).map_err(|_| "Not a list of actions".to_string())?;
+            daemon.set_actions(actions)?;
+            Ok(Value::Null)
+        }
+        // There's no command that unlocks: only a signature from the phone's hardware key can
+        "lock_state" => {
+            let locked = request.get("locked").and_then(Value::as_bool).ok_or("No answer")?;
+            let password_required = request.get("password_required").and_then(Value::as_bool).unwrap_or(true);
+            daemon.set_lock_state(locked, password_required);
+            Ok(Value::Null)
+        }
+        "unlock_prompt" => {
+            daemon.prompt_unlock();
+            Ok(Value::Null)
+        }
+        "unlock_answer" => {
+            let accept = request.get("accept").and_then(Value::as_bool).ok_or("No answer")?;
+            daemon.answer_unlock(fingerprint.ok_or("No phone")?, accept)?;
+            Ok(Value::Null)
+        }
+        "unlock_disable" => {
+            daemon.disable_unlock(fingerprint.ok_or("No phone")?)?;
+            Ok(Value::Null)
+        }
         "quit" => {
             daemon.shutdown.notify_one();
             Ok(Value::Null)

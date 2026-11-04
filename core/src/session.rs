@@ -302,7 +302,7 @@ impl Session {
                 self.handler.event(Event::Connected { peer, paired: self.active() });
             }
             Message::Ping => self.send(Message::Pong).await?,
-            Message::Pong => {}
+            Message::Pong | Message::Unknown => {}
             Message::PairCommit { commitment } => {
                 self.peer()?;
                 if self.local.role != Role::Server {

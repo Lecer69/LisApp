@@ -1,9 +1,13 @@
 //! The PC side of Lis App: listens for the phone on the local network and serves the shell.
 
+mod actions;
 mod camera;
 mod daemon;
 mod ipc;
+mod media;
+mod obs;
 mod stats;
+mod sync;
 
 use anyhow::Context;
 use daemon::{Daemon, Paths};
@@ -24,6 +28,9 @@ use tokio::sync::Semaphore;
 /// Enough for real phones; keeps strangers on the network from opening connections without limit.
 const MAX_CONNECTIONS: usize = 32;
 const STATS_EVERY: Duration = Duration::from_secs(30);
+/// How soon a save in the shell reaches the phone.
+const SYNC_EVERY: Duration = Duration::from_secs(1);
+const USB_EVERY: Duration = Duration::from_secs(5);
 
 fn paths() -> anyhow::Result<Paths> {
     let home = env::var_os("HOME").map(PathBuf::from).context("HOME isn't set")?;
@@ -34,6 +41,7 @@ fn paths() -> anyhow::Result<Paths> {
         socket: runtime.join("lis-app.sock"),
         camera_socket: runtime.join("lis-camera.sock"),
         downloads: home.join("Downloads"),
+        shell_data: home.join(".config/lis"),
     })
 }
 
@@ -121,6 +129,40 @@ async fn run() -> anyhow::Result<()> {
             }
         });
     }
+    {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(SYNC_EVERY);
+            loop {
+                ticker.tick().await;
+                daemon.sync_tick();
+            }
+        });
+    }
+    {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(USB_EVERY);
+            loop {
+                ticker.tick().await;
+                daemon.usb_tick().await;
+            }
+        });
+    }
+    {
+        let daemon = daemon.clone();
+        let wake = daemon.media.wake();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(media::EVERY);
+            loop {
+                tokio::select! {
+                    _ = ticker.tick() => {}
+                    _ = wake.notified() => {}
+                }
+                daemon.media.tick(&daemon).await;
+            }
+        });
+    }
     let phones = tokio::spawn(accept_phones(listener, daemon.clone()));
     let stats = {
         let daemon = daemon.clone();
@@ -164,12 +206,13 @@ async fn main() -> ExitCode {
             Ok(paths) => ipc::ctl(&paths.socket, request).await,
             Err(error) => Err(error),
         },
+        ["obs", rest @ ..] => obs::run(rest),
         ["--version"] => {
             println!("lis-daemon {}", env!("CARGO_PKG_VERSION"));
             Ok(true)
         }
         _ => {
-            eprintln!("usage: lis-daemon [run] | lis-daemon ctl '<json>' | lis-daemon --version");
+            eprintln!("usage: lis-daemon [run] | lis-daemon ctl '<json>' | {} | lis-daemon --version", obs::USAGE);
             Ok(false)
         }
     };

@@ -415,3 +415,42 @@ async fn only_one_daemon_runs_and_bad_requests_are_answered() {
     assert_eq!(pc.request(json!({ "cmd": "pair_confirm", "accept": true })).await["ok"], json!(false));
     assert_eq!(pc.request(json!({ "cmd": "unpair", "fingerprint": "nope" })).await["ok"], json!(false));
 }
+
+#[tokio::test]
+async fn a_message_from_a_newer_version_does_not_end_the_connection() {
+    let pc = Pc::start();
+    pc.wait_for_socket().await;
+    let mut phone = Phone::connect(&pc).await;
+    phone.pair(&pc).await;
+
+    phone.send(Message::Unknown).await;
+    phone.send(Message::PhoneStats(PhoneStats { battery_percent: 77, ..Default::default() })).await;
+    pc.until("the stats after it", |status| status["phones"][0]["stats"]["battery_percent"] == json!(77)).await;
+    assert!(pc.status().await["phones"][0]["connected"] == json!(true));
+}
+
+#[tokio::test]
+async fn a_bad_document_from_a_phone_changes_nothing_and_it_is_told() {
+    let pc = Pc::start();
+    pc.wait_for_socket().await;
+    let notes = json!([{ "id": 1, "title": "a", "body": "x", "created": 1, "updated": 1 }]);
+    pc.write_shell_file("notes.json", &notes);
+    let mut phone = Phone::connect(&pc).await;
+    phone.pair(&pc).await;
+
+    let rev = match phone.until(|event| matches!(event, Event::Message { message: Message::SyncDoc { kind, .. }, .. } if kind == "notes")).await {
+        Event::Message { message: Message::SyncDoc { rev, doc, .. }, .. } => {
+            assert_eq!(doc, notes);
+            rev
+        }
+        _ => unreachable!(),
+    };
+    phone.send(Message::SyncPush { kind: "notes".into(), based_on: rev, doc: json!({ "not": "notes" }) }).await;
+    phone.until(|event| matches!(event, Event::Message { message: Message::SyncRejected { kind, .. }, .. } if kind == "notes")).await;
+    assert_eq!(pc.read_shell_file("notes.json"), notes);
+
+    // Not a file that syncs, wherever it might point
+    phone.send(Message::SyncPush { kind: "../../.ssh/config".into(), based_on: String::new(), doc: json!([]) }).await;
+    phone.until(|event| matches!(event, Event::Message { message: Message::SyncRejected { kind, .. }, .. } if kind.contains("ssh"))).await;
+    assert!(!pc.home.path().join(".ssh").exists());
+}

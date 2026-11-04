@@ -352,13 +352,14 @@ class CameraStreamer(private val context: Context) {
     private fun send(codec: MediaCodec, frame: ByteArray, info: MediaCodec.BufferInfo) {
         val keyframe = info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0
         val data = if (keyframe) codecConfig + frame else frame
-        val needKeyframe = Lis.client.sendVideoFrame(data, info.presentationTimeUs, keyframe)
+        val feedback = Lis.client.sendVideoFrame(data, info.presentationTimeUs, keyframe)
 
         val now = SystemClock.elapsedRealtime()
-        if (needKeyframe && now - lastKeyframeRequest > KEYFRAME_REQUEST_MS) {
+        if (feedback.needKeyframe && now - lastKeyframeRequest > KEYFRAME_REQUEST_MS) {
             lastKeyframeRequest = now
             codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) })
         }
+        feedback.bitrate?.let { changeBitrate(codec, it.toInt()) }
 
         windowFrames++
         windowBytes += data.size
@@ -371,6 +372,14 @@ class CameraStreamer(private val context: Context) {
             windowBytes = 0
             Lis.update { copy(camera = camera.copy(fps = fps, mbps = mbps)) }
         }
+    }
+
+    /** Takes effect from the next frames, with no restart of the camera or the stream. */
+    private fun changeBitrate(codec: MediaCodec, bitrate: Int) {
+        codec.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, bitrate) })
+        val current = config ?: return
+        Log.i(TAG, "bitrate now $bitrate bps, chosen ${current.bitrate}")
+        Lis.update { copy(camera = camera.copy(limited = bitrate.toUInt() < current.bitrate)) }
     }
 
     /** Degrees clockwise to show the frames upright, as Camera2 documents it. */
