@@ -17,6 +17,9 @@ use tokio_rustls::{client, server, TlsAcceptor, TlsConnector};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Marks a connection as the camera stream. The main connection offers no protocol.
+const VIDEO_ALPN: &[u8] = b"lis-video/1";
+
 fn provider() -> Arc<CryptoProvider> {
     Arc::new(ring::default_provider())
 }
@@ -113,22 +116,40 @@ impl ClientCertVerifier for AnyClientCert {
 pub fn acceptor(identity: &Identity) -> Result<TlsAcceptor, Error> {
     let provider = provider();
     let (certs, key) = cert_and_key(identity);
-    let config = ServerConfig::builder_with_provider(provider.clone())
+    let mut config = ServerConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(AnyClientCert(provider)))
         .with_single_cert(certs, key)?;
+    config.alpn_protocols = vec![VIDEO_ALPN.to_vec()];
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
-pub fn connector(identity: &Identity) -> Result<TlsConnector, Error> {
+fn client_config(identity: &Identity) -> Result<ClientConfig, Error> {
     let provider = provider();
     let (certs, key) = cert_and_key(identity);
-    let config = ClientConfig::builder_with_provider(provider.clone())
+    ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AnyServerCert(provider)))
-        .with_client_auth_cert(certs, key)?;
+        .with_client_auth_cert(certs, key)
+}
+
+pub fn connector(identity: &Identity) -> Result<TlsConnector, Error> {
+    Ok(TlsConnector::from(Arc::new(client_config(identity)?)))
+}
+
+pub fn video_connector(identity: &Identity) -> Result<TlsConnector, Error> {
+    let mut config = client_config(identity)?;
+    config.alpn_protocols = vec![VIDEO_ALPN.to_vec()];
     Ok(TlsConnector::from(Arc::new(config)))
+}
+
+pub fn server_is_video(stream: &client::TlsStream<TcpStream>) -> bool {
+    stream.get_ref().1.alpn_protocol() == Some(VIDEO_ALPN)
+}
+
+pub fn client_is_video(stream: &server::TlsStream<TcpStream>) -> bool {
+    stream.get_ref().1.alpn_protocol() == Some(VIDEO_ALPN)
 }
 
 fn peer_fingerprint(certs: Option<&[CertificateDer<'_>]>) -> io::Result<String> {

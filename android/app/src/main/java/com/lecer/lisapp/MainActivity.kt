@@ -5,12 +5,16 @@ import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.Surface
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,6 +29,19 @@ import androidx.core.net.toUri
 
 class MainActivity : ComponentActivity() {
     private var setup by mutableStateOf(SetupState())
+    private var showCamera by mutableStateOf(false)
+    private var wantedFps by mutableStateOf(DEFAULT_FPS)
+
+    private val camera by lazy { CameraStreamer(applicationContext) }
+    private var previewSurface: Surface? = null
+
+    private val askCamera = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            startCamera()
+        } else {
+            Lis.update { copy(camera = camera.copy(error = "Lis App needs camera access for this")) }
+        }
+    }
 
     private val askPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         refreshSetup()
@@ -40,6 +57,22 @@ class MainActivity : ComponentActivity() {
         setContent {
             val state by Lis.state.collectAsState()
             LisTheme {
+                if (showCamera) {
+                    BackHandler(onBack = ::closeCamera)
+                    CameraScreen(
+                        state = state,
+                        wantedFps = wantedFps,
+                        actions = CameraActions(
+                            close = ::closeCamera,
+                            start = ::requestCamera,
+                            stop = ::stopCamera,
+                            switchCamera = ::switchCamera,
+                            setFps = { wantedFps = it },
+                            surface = ::onPreviewSurface,
+                        ),
+                    )
+                    return@LisTheme
+                }
                 LisScreen(
                     state = state,
                     setup = setup,
@@ -48,6 +81,7 @@ class MainActivity : ComponentActivity() {
                         answerCode = Lis::answerCode,
                         lockPc = { Lis.client.lockPc() },
                         sendFile = { pickFiles.launch(arrayOf("*/*")) },
+                        openCamera = ::openCamera,
                         unpair = {
                             Lis.unpair()
                             refreshSetup()
@@ -74,12 +108,60 @@ class MainActivity : ComponentActivity() {
         SyncService.start(this)
     }
 
-    /** Without a paired PC there's nothing to stay connected for. */
+    /** The camera never runs off screen. Without a paired PC, there's nothing to stay connected for. */
     override fun onStop() {
+        stopCamera()
         super.onStop()
         if (Lis.client.pairedPc() == null && !isChangingConfigurations) {
             Lis.client.disconnect()
             SyncService.stop(this)
+        }
+    }
+
+    @SuppressLint("SourceLockedOrientationActivity")
+    private fun openCamera() {
+        Lis.onCameraRefused = { runOnUiThread(::stopCamera) }
+        Lis.update { copy(camera = camera.copy(error = null)) }
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        showCamera = true
+    }
+
+    private fun closeCamera() {
+        stopCamera()
+        showCamera = false
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+    }
+
+    private fun onPreviewSurface(surface: Surface?) {
+        previewSurface = surface
+        if (surface == null) stopCamera()
+    }
+
+    private fun requestCamera() {
+        if (granted(Manifest.permission.CAMERA)) {
+            startCamera()
+        } else {
+            askCamera.launch(Manifest.permission.CAMERA)
+        }
+    }
+
+    private fun startCamera(front: Boolean = Lis.state.value.camera.front) {
+        val surface = previewSurface ?: return
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        camera.start(surface, front, wantedFps)
+    }
+
+    private fun stopCamera() {
+        camera.stop()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private fun switchCamera() {
+        val status = Lis.state.value.camera
+        if (status.running) {
+            startCamera(front = !status.front)
+        } else {
+            Lis.update { copy(camera = camera.copy(front = !status.front)) }
         }
     }
 
@@ -136,5 +218,9 @@ class MainActivity : ComponentActivity() {
         false
     } catch (_: SecurityException) {
         false
+    }
+
+    private companion object {
+        const val DEFAULT_FPS = 60
     }
 }

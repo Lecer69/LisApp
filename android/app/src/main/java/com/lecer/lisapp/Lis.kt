@@ -11,6 +11,7 @@ import uniffi.lis_ffi.ConnectionState
 import uniffi.lis_ffi.LisClient
 import uniffi.lis_ffi.PairedPc
 import uniffi.lis_ffi.PcStats
+import uniffi.lis_ffi.VideoState
 
 data class FoundPc(val name: String, val host: String, val port: Int, val fingerprintStart: String)
 
@@ -23,12 +24,16 @@ data class AppState(
     val pcStats: PcStats? = null,
     val found: List<FoundPc> = emptyList(),
     val transfer: String? = null,
+    val camera: CameraStatus = CameraStatus(),
 )
 
 /** The one client for the process, and the state the screens and the service read. */
 object Lis {
     private lateinit var appContext: Context
     private var wantsPairing = false
+
+    /** So a camera the PC turned away stops encoding, on the screen that owns it. */
+    var onCameraRefused: (() -> Unit)? = null
 
     lateinit var client: LisClient
         private set
@@ -110,6 +115,21 @@ object Lis {
 
         override fun onFileFinished(id: ULong, name: String, incoming: Boolean, ok: Boolean) {
             Transfers.finish(appContext, id, name, incoming, ok)
+        }
+
+        override fun onVideoState(state: VideoState) {
+            when (state) {
+                VideoState.Connecting -> update { copy(camera = camera.copy(live = false)) }
+                VideoState.Live -> update { copy(camera = camera.copy(live = true, error = null)) }
+                is VideoState.Refused -> {
+                    update { copy(camera = camera.copy(live = false, error = state.reason)) }
+                    onCameraRefused?.invoke()
+                }
+            }
+        }
+
+        override fun onVideoViewers(count: UInt) {
+            update { copy(camera = camera.copy(viewers = count.toInt())) }
         }
     }
 }

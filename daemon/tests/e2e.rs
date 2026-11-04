@@ -321,6 +321,77 @@ async fn unpairing_tells_the_phone() {
     assert_eq!(pc.log("hyprctl"), "");
 }
 
+/// A phone that ignores being unpaired and keeps sending, as a modified app could.
+#[tokio::test]
+async fn unpairing_cuts_off_a_phone_that_keeps_streaming() {
+    use lis_core::video::{read_packet, write_packet_async, Packet, VideoFrame, VideoInfo, CODEC_H264};
+
+    let (pc, phone) = paired().await;
+    let info = VideoInfo { codec: CODEC_H264.into(), width: 1920, height: 1080, fps: 60, bitrate: 1, rotation: 0, camera: "back".into() };
+
+    let viewer_path = pc.home.path().join("run/lis-camera.sock");
+    let mut viewer = std::os::unix::net::UnixStream::connect(&viewer_path).unwrap();
+    viewer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+    let connector = tls::video_connector(&phone.identity).unwrap();
+    let (mut stream, _) = tls::connect(&connector, "127.0.0.1", pc.port).await.unwrap();
+    write_packet_async(&mut stream, &Packet::Info(info)).await.unwrap();
+
+    // Keeps going whatever happens, and stops only at the end of the test
+    let sender = tokio::spawn(async move {
+        let mut pts = 0;
+        loop {
+            let frame = Packet::Frame(VideoFrame { pts_us: pts, keyframe: true, data: vec![1; 64] });
+            if write_packet_async(&mut stream, &frame).await.is_err() {
+                return pts;
+            }
+            pts += 1;
+            sleep(Duration::from_millis(5)).await;
+        }
+    });
+
+    let (reader, first) = tokio::task::spawn_blocking(move || {
+        loop {
+            match read_packet(&mut viewer).expect("a packet") {
+                Packet::Frame(frame) => return (viewer, frame),
+                Packet::Info(_) => {}
+                other => panic!("{other:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(first.keyframe, "its frames reach the viewer while it's paired");
+
+    pc.ok(json!({ "cmd": "unpair", "fingerprint": phone.fingerprint() })).await;
+
+    let ended = tokio::task::spawn_blocking(move || {
+        let mut viewer = reader;
+        let limit = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < limit {
+            match read_packet(&mut viewer) {
+                Ok(Packet::End) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+        false
+    })
+    .await
+    .unwrap();
+    assert!(ended, "the viewer sees the camera stop");
+    assert!(pc.status().await["camera"].is_null());
+
+    let stopped = timeout(WAIT, sender).await.expect("the daemon hangs up on it");
+    assert!(stopped.is_ok());
+
+    // And it can't come back
+    let (mut again, _) = tls::connect(&connector, "127.0.0.1", pc.port).await.unwrap();
+    let _ = write_packet_async(&mut again, &Packet::Info(VideoInfo { codec: CODEC_H264.into(), width: 1, height: 1, fps: 1, bitrate: 1, rotation: 0, camera: "x".into() })).await;
+    sleep(Duration::from_millis(300)).await;
+    assert!(pc.status().await["camera"].is_null());
+}
+
 #[tokio::test]
 async fn only_one_daemon_runs_and_bad_requests_are_answered() {
     let pc = start().await;

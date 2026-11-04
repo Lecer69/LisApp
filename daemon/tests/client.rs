@@ -3,7 +3,10 @@
 mod common;
 
 use common::Pc;
-use lis_ffi::{ClientListener, ConnectionState, LisClient, PcStats, PhoneStats};
+use lis_core::identity::Identity;
+use lis_core::tls;
+use lis_core::video::{read_packet, write_packet_async, Packet, VideoFrame, VideoInfo, CODEC_H264};
+use lis_ffi::{ClientListener, ConnectionState, LisClient, PcStats, PhoneStats, VideoConfig, VideoState};
 use serde_json::json;
 use std::os::fd::IntoRawFd;
 use std::path::PathBuf;
@@ -18,6 +21,8 @@ enum Heard {
     PairResult(bool, String),
     Stats(PcStats),
     Finished(String, bool, bool),
+    Video(VideoState),
+    Viewers(u32),
 }
 
 #[derive(Clone)]
@@ -45,6 +50,12 @@ impl ClientListener for Listener {
     fn on_file_progress(&self, _id: u64, _name: String, _incoming: bool, _done: u64, _total: u64) {}
     fn on_file_finished(&self, _id: u64, name: String, incoming: bool, ok: bool) {
         self.heard.lock().unwrap().push(Heard::Finished(name, incoming, ok));
+    }
+    fn on_video_state(&self, state: VideoState) {
+        self.heard.lock().unwrap().push(Heard::Video(state));
+    }
+    fn on_video_viewers(&self, count: u32) {
+        self.heard.lock().unwrap().push(Heard::Viewers(count));
     }
 }
 
@@ -309,4 +320,298 @@ fn an_unreachable_pc_reports_disconnected_and_keeps_trying() {
     app.clear();
     app.client.reconnect_now();
     app.state(ConnectionState::Connecting);
+}
+
+fn camera_config() -> VideoConfig {
+    VideoConfig { width: 1920, height: 1080, fps: 60, bitrate: 16_000_000, rotation: 90, camera: "back".into() }
+}
+
+fn viewer(pc: &Pc) -> std::os::unix::net::UnixStream {
+    let stream = std::os::unix::net::UnixStream::connect(pc.home.path().join("run/lis-camera.sock")).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    stream
+}
+
+fn frame_bytes(pts: i64) -> Vec<u8> {
+    pts.to_be_bytes().repeat(4)
+}
+
+fn next_frame(stream: &mut std::os::unix::net::UnixStream) -> VideoFrame {
+    loop {
+        match read_packet(stream).expect("a packet") {
+            Packet::Frame(frame) => return frame,
+            Packet::Info(_) => {}
+            other => panic!("expected a frame, got {other:?}"),
+        }
+    }
+}
+
+/// Paired, with the camera live and a viewer watching.
+fn camera_live(rt: &Runtime, pc: &Pc) -> (App, std::os::unix::net::UnixStream) {
+    let app = App::new();
+    app.pair(rt, pc);
+    let stream = viewer(pc);
+    app.client.start_video(camera_config()).unwrap();
+    app.wait("the camera live", |heard| *heard == Heard::Video(VideoState::Live));
+    app.wait("one viewer", |heard| *heard == Heard::Viewers(1));
+    (app, stream)
+}
+
+#[test]
+fn camera_frames_reach_a_viewer_intact() {
+    let (rt, pc) = start();
+    let (app, mut stream) = camera_live(&rt, &pc);
+
+    match read_packet(&mut stream).unwrap() {
+        Packet::Info(info) => {
+            assert_eq!(info, VideoInfo::from(camera_config()));
+            assert_eq!(info.codec, CODEC_H264);
+        }
+        other => panic!("expected the camera's info, got {other:?}"),
+    }
+
+    assert!(app.client.send_video_frame(frame_bytes(0), 0, false), "nothing before the first keyframe");
+    assert!(!app.client.send_video_frame(frame_bytes(1), 1, true));
+    assert!(!app.client.send_video_frame(frame_bytes(2), 2, false));
+    assert_eq!(
+        next_frame(&mut stream),
+        VideoFrame { pts_us: 1, keyframe: true, data: frame_bytes(1) }
+    );
+    assert_eq!(
+        next_frame(&mut stream),
+        VideoFrame { pts_us: 2, keyframe: false, data: frame_bytes(2) }
+    );
+
+    let status = rt.block_on(pc.status());
+    assert_eq!(status["camera"]["camera"], json!("back"));
+    assert_eq!(status["camera"]["width"], json!(1920));
+    assert_eq!(status["camera"]["fps"], json!(60));
+    assert_eq!(status["camera"]["viewers"], json!(1));
+    assert_eq!(status["camera"]["phone"], json!("Test Phone"));
+}
+
+#[test]
+fn turning_the_phone_tells_the_viewer() {
+    let (rt, pc) = start();
+    let (app, mut stream) = camera_live(&rt, &pc);
+    assert!(matches!(read_packet(&mut stream).unwrap(), Packet::Info(info) if info.rotation == 90));
+
+    app.client.update_video(VideoConfig { rotation: 180, ..camera_config() });
+    assert!(matches!(read_packet(&mut stream).unwrap(), Packet::Info(info) if info.rotation == 180));
+    rt.block_on(pc.until("the new rotation", |s| s["camera"]["rotation"] == json!(180)));
+}
+
+#[test]
+fn stopping_the_camera_tells_the_viewer_and_can_restart() {
+    let (rt, pc) = start();
+    let (app, mut stream) = camera_live(&rt, &pc);
+    assert!(matches!(read_packet(&mut stream).unwrap(), Packet::Info(_)));
+
+    app.client.stop_video();
+    assert_eq!(read_packet(&mut stream).unwrap(), Packet::End);
+    rt.block_on(pc.until("the camera gone", |s| s["camera"].is_null()));
+    assert!(!app.client.send_video_frame(frame_bytes(1), 1, true), "ignored once stopped");
+
+    app.clear();
+    app.client.start_video(camera_config()).unwrap();
+    app.wait("live again", |heard| *heard == Heard::Video(VideoState::Live));
+    assert!(matches!(read_packet(&mut stream).unwrap(), Packet::Info(_)));
+    assert!(!app.client.send_video_frame(frame_bytes(5), 5, true));
+    assert_eq!(next_frame(&mut stream).pts_us, 5);
+}
+
+#[test]
+fn a_late_viewer_starts_at_a_keyframe() {
+    let (rt, pc) = start();
+    let app = App::new();
+    app.pair(&rt, &pc);
+    app.client.start_video(camera_config()).unwrap();
+    app.wait("the camera live", |heard| *heard == Heard::Video(VideoState::Live));
+    app.client.send_video_frame(frame_bytes(1), 1, true);
+    rt.block_on(pc.until("the camera known", |s| !s["camera"].is_null()));
+
+    let mut stream = viewer(&pc);
+    assert!(matches!(read_packet(&mut stream).unwrap(), Packet::Info(_)), "told what's playing at once");
+    app.wait("one viewer", |heard| *heard == Heard::Viewers(1));
+
+    app.client.send_video_frame(frame_bytes(2), 2, false);
+    app.client.send_video_frame(frame_bytes(3), 3, false);
+    std::thread::sleep(Duration::from_millis(100));
+    app.client.send_video_frame(frame_bytes(4), 4, true);
+    let first = next_frame(&mut stream);
+    assert_eq!((first.pts_us, first.keyframe), (4, true));
+}
+
+#[test]
+fn a_slow_viewer_only_ever_resumes_at_a_keyframe() {
+    let (rt, pc) = start();
+    let (app, mut stream) = camera_live(&rt, &pc);
+    assert!(matches!(read_packet(&mut stream).unwrap(), Packet::Info(_)));
+
+    // Big enough to fill the socket while the viewer isn't reading
+    let big = |pts: i64| vec![pts as u8; 150_000];
+    let mut pts = 0;
+    for _ in 0..4 {
+        for offset in 0..30 {
+            app.client.send_video_frame(big(pts), pts, offset == 0);
+            pts += 1;
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    let burst_end = pts;
+
+    // Small keyframes from here on, so the viewer always has one to resume from
+    let client = app.client.clone();
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sender = {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mut pts = burst_end;
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                client.send_video_frame(frame_bytes(pts), pts, true);
+                pts += 1;
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+    };
+
+    let mut previous: Option<i64> = None;
+    let mut gaps = 0;
+    loop {
+        let frame = next_frame(&mut stream);
+        match previous {
+            Some(previous) if frame.pts_us != previous + 1 => {
+                gaps += 1;
+                assert!(frame.keyframe, "resumed at {} after {previous} without a keyframe", frame.pts_us);
+            }
+            None => assert!(frame.keyframe, "started without a keyframe"),
+            _ => {}
+        }
+        previous = Some(frame.pts_us);
+        if frame.pts_us >= burst_end {
+            break;
+        }
+    }
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    sender.join().unwrap();
+    assert!(gaps > 0, "the test should have made the viewer fall behind");
+}
+
+#[test]
+fn a_stranger_cannot_send_video() {
+    let (rt, pc) = start();
+    let mut stream = viewer(&pc);
+    stream.set_read_timeout(Some(Duration::from_millis(600))).unwrap();
+
+    let stranger = Identity::generate().unwrap();
+    let connector = tls::video_connector(&stranger).unwrap();
+    let info = VideoInfo::from(camera_config());
+    let frame = VideoFrame { pts_us: 1, keyframe: true, data: vec![1, 2, 3] };
+    rt.block_on(async {
+        let (mut tls, _) = tls::connect(&connector, "127.0.0.1", pc.port).await.unwrap();
+        let _ = write_packet_async(&mut tls, &Packet::Info(info)).await;
+        let _ = write_packet_async(&mut tls, &Packet::Frame(frame)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    assert!(read_packet(&mut stream).is_err(), "the viewer must see nothing");
+    assert!(rt.block_on(pc.status())["camera"].is_null());
+}
+
+#[test]
+fn a_viewer_cannot_be_reached_by_other_users() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_rt, pc) = start();
+    let mode = std::fs::metadata(pc.home.path().join("run/lis-camera.sock")).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+#[test]
+fn the_camera_sends_nothing_to_a_different_pc() {
+    let (rt, pc) = start();
+    let app = App::new();
+    app.pair(&rt, &pc);
+
+    let (rt2, impostor) = start();
+    let mut stream = viewer(&impostor);
+    stream.set_read_timeout(Some(Duration::from_millis(600))).unwrap();
+    app.client.connect("127.0.0.1".into(), impostor.port);
+    app.state(ConnectionState::WrongPc);
+
+    app.client.start_video(camera_config()).unwrap();
+    let refused = app.wait("a refusal", |heard| matches!(heard, Heard::Video(VideoState::Refused { .. })));
+    assert!(format!("{refused:?}").contains("Another device"), "{refused:?}");
+
+    app.client.send_video_frame(frame_bytes(1), 1, true);
+    assert!(read_packet(&mut stream).is_err(), "the other PC must see nothing");
+    assert!(rt2.block_on(impostor.status())["camera"].is_null());
+}
+
+#[test]
+fn unpairing_on_the_pc_stops_a_live_camera() {
+    let (rt, pc) = start();
+    let (app, mut stream) = camera_live(&rt, &pc);
+    assert!(matches!(read_packet(&mut stream).unwrap(), Packet::Info(_)));
+    assert!(!app.client.send_video_frame(frame_bytes(1), 1, true));
+    assert_eq!(next_frame(&mut stream).pts_us, 1);
+
+    let fingerprint = rt.block_on(pc.status())["phones"][0]["fingerprint"].as_str().unwrap().to_string();
+    rt.block_on(pc.ok(json!({ "cmd": "unpair", "fingerprint": fingerprint })));
+
+    assert_eq!(read_packet(&mut stream).unwrap(), Packet::End, "the viewer sees it stop");
+    assert!(rt.block_on(pc.status())["camera"].is_null());
+    let told = app.wait("the phone being told", |heard| matches!(heard, Heard::Video(VideoState::Refused { .. })));
+    assert!(format!("{told:?}").contains("no longer paired"), "{told:?}");
+
+    // Nothing more gets through
+    assert!(!app.client.send_video_frame(frame_bytes(2), 2, true));
+    stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    assert!(read_packet(&mut stream).is_err());
+}
+
+#[test]
+fn the_camera_needs_pairing() {
+    let app = App::new();
+    assert!(app.client.start_video(camera_config()).is_err());
+    assert!(!app.client.send_video_frame(vec![1], 1, true));
+}
+
+#[test]
+fn while_the_pc_is_away_frames_wait_for_a_keyframe() {
+    let (rt, mut pc) = start();
+    let app = App::new();
+    app.pair(&rt, &pc);
+    pc.child.kill().unwrap();
+    pc.child.wait().unwrap();
+    app.state(ConnectionState::Disconnected);
+
+    app.client.start_video(camera_config()).unwrap();
+    assert!(app.client.send_video_frame(vec![1], 1, false), "asks for a keyframe");
+
+    // A full queue drops frames rather than letting the delay grow
+    let mut asked = false;
+    for pts in 0..64 {
+        asked |= app.client.send_video_frame(vec![1], pts, true);
+    }
+    assert!(asked, "a full queue should ask for a keyframe");
+    assert!(app.client.send_video_frame(vec![1], 99, false));
+}
+
+#[test]
+fn the_camera_comes_back_when_the_pc_does() {
+    let (rt, mut pc) = start();
+    let (app, _stream) = camera_live(&rt, &pc);
+    app.clear();
+
+    rt.block_on(pc.restart());
+    app.client.reconnect_now();
+    let mut stream = viewer(&pc);
+    stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+    app.wait("live again", |heard| *heard == Heard::Video(VideoState::Live));
+    assert!(matches!(read_packet(&mut stream).unwrap(), Packet::Info(_)));
+
+    // Waits for a keyframe, as the old stream is gone
+    assert!(app.client.send_video_frame(frame_bytes(1), 1, false));
+    assert!(!app.client.send_video_frame(frame_bytes(2), 2, true));
+    assert_eq!(next_frame(&mut stream).pts_us, 2);
 }

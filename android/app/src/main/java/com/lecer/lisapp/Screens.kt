@@ -51,6 +51,7 @@ class ScreenActions(
     val answerCode: (Boolean) -> Unit,
     val lockPc: () -> Unit,
     val sendFile: () -> Unit,
+    val openCamera: () -> Unit,
     val unpair: () -> Unit,
     val askNotifications: () -> Unit,
     val askBackground: () -> Unit,
@@ -206,6 +207,9 @@ private fun HomeScreen(state: AppState, setup: SetupState, actions: ScreenAction
         OutlinedButton(enabled = connected, onClick = actions.sendFile, modifier = Modifier.weight(1f)) {
             Text("Send file")
         }
+    }
+    OutlinedButton(enabled = connected, onClick = actions.openCamera, modifier = Modifier.fillMaxWidth()) {
+        Text("Camera")
     }
     state.transfer?.let { Secondary(it) }
 

@@ -6,3 +6,4 @@ pub mod pairing;
 pub mod protocol;
 pub mod session;
 pub mod tls;
+pub mod video;

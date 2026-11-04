@@ -1,5 +1,6 @@
 //! The PC side of Lis App: listens for the phone on the local network and serves the shell.
 
+mod camera;
 mod daemon;
 mod ipc;
 mod stats;
@@ -28,7 +29,12 @@ fn paths() -> anyhow::Result<Paths> {
     let home = env::var_os("HOME").map(PathBuf::from).context("HOME isn't set")?;
     let data = env::var_os("XDG_DATA_HOME").map_or_else(|| home.join(".local/share"), PathBuf::from).join("lis-app");
     let runtime = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).context("XDG_RUNTIME_DIR isn't set")?;
-    Ok(Paths { data, socket: runtime.join("lis-app.sock"), downloads: home.join("Downloads") })
+    Ok(Paths {
+        data,
+        socket: runtime.join("lis-app.sock"),
+        camera_socket: runtime.join("lis-camera.sock"),
+        downloads: home.join("Downloads"),
+    })
 }
 
 fn advertise(identity_fp: &str, name: &str, port: u16) -> Option<mdns_sd::ServiceDaemon> {
@@ -64,6 +70,13 @@ async fn accept_phones(listener: TcpListener, daemon: Arc<Daemon>) -> anyhow::Re
         tokio::spawn(async move {
             let _permit = permit;
             let Ok((stream, peer)) = tls::accept(&acceptor, tcp).await else { return };
+            if tls::client_is_video(&stream) {
+                // Never a way in: only a phone that's already paired can send video
+                if let Some(name) = daemon.phone_name(&peer) {
+                    camera::serve_phone(stream, peer, name, daemon.clone()).await;
+                }
+                return;
+            }
             let (handle, commands) = Handle::channel();
             let generation = daemon.register(&peer, handle);
             let local = Local { name: daemon.name.clone(), fingerprint, role: Role::Server, timing: Timing::default() };
@@ -80,7 +93,9 @@ async fn run() -> anyhow::Result<()> {
     let paths = paths()?;
     std::fs::create_dir_all(&paths.data)?;
     let socket = paths.socket.clone();
+    let camera_socket = paths.camera_socket.clone();
     let ipc = ipc::bind(&socket).await?;
+    let viewers = camera::bind(&camera_socket)?;
 
     let identity = Identity::load_or_create(&paths.data)?;
     let port = env::var("LIS_APP_PORT").ok().and_then(|port| port.parse().ok()).unwrap_or(DEFAULT_PORT);
@@ -95,6 +110,17 @@ async fn run() -> anyhow::Result<()> {
     };
 
     tokio::spawn(ipc::serve(ipc, daemon.clone()));
+    tokio::spawn(camera::serve_viewers(viewers, daemon.clone()));
+    {
+        let daemon = daemon.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(camera::STATS_EVERY);
+            loop {
+                ticker.tick().await;
+                daemon.camera_tick();
+            }
+        });
+    }
     let phones = tokio::spawn(accept_phones(listener, daemon.clone()));
     let stats = {
         let daemon = daemon.clone();
@@ -123,6 +149,7 @@ async fn run() -> anyhow::Result<()> {
         let _ = mdns.shutdown();
     }
     let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&camera_socket);
     Ok(())
 }
 

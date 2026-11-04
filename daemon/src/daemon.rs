@@ -1,5 +1,6 @@
 //! The state behind the connections, and what each event from a phone does on this PC.
 
+use crate::camera::Camera;
 use crate::stats::{hostname, Sampler};
 use lis_core::identity::{write_private, Identity};
 use lis_core::names::safe_file_name;
@@ -19,6 +20,7 @@ use tokio::time::Instant;
 pub struct Paths {
     pub data: PathBuf,
     pub socket: PathBuf,
+    pub camera_socket: PathBuf,
     pub downloads: PathBuf,
 }
 
@@ -65,6 +67,7 @@ pub struct Daemon {
     pub port: u16,
     pub paths: Paths,
     pub shutdown: Notify,
+    pub camera: Camera,
     state: Mutex<State>,
     events: broadcast::Sender<String>,
 }
@@ -114,6 +117,7 @@ impl Daemon {
             port,
             paths,
             shutdown: Notify::new(),
+            camera: Camera::new(),
             state: Mutex::new(State { trusted, ..Default::default() }),
             events,
         }
@@ -131,7 +135,20 @@ impl Daemon {
         let _ = self.events.send(message.to_string());
     }
 
-    fn publish_status(&self) {
+    /// A paired phone's name.
+    pub fn phone_name(&self, fingerprint: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        state.trusted.iter().find(|phone| phone.fingerprint == fingerprint).map(|phone| phone.name.clone())
+    }
+
+    /// Updates the camera's figures; only reports while it's live, as nothing changes otherwise.
+    pub fn camera_tick(&self) {
+        if self.camera.measure() {
+            self.publish_status();
+        }
+    }
+
+    pub fn publish_status(&self) {
         self.publish("status", json!({ "status": self.status() }));
     }
 
@@ -157,6 +174,7 @@ impl Daemon {
             "pairing": pairing,
             "pair_code": state.pair_code.as_ref().map(|pair| json!({ "name": pair.name, "code": pair.code })),
             "phones": phones,
+            "camera": self.camera.status(),
         })
     }
 
@@ -384,6 +402,8 @@ impl Handler for Daemon {
             link.paired = false;
         }
         self.save_trusted(&state);
+        drop(state);
+        self.camera.drop_phone(fingerprint);
     }
 
     fn open_incoming(&self, peer: &Peer, offer: &FileOffer) -> Option<fs::File> {

@@ -1,29 +1,33 @@
 #!/usr/bin/env bash
-# Builds Lis App: installs lis-daemon on this PC, and puts the APK in output/ for the phone.
+# Builds Lis App: installs lis-daemon and the OBS plugin on this PC, and puts the APK in output/ for
+# the phone.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 bin_dir="$HOME/.local/bin"
+plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/obs-studio/plugins/lis-camera/bin/64bit"
 built_apk="$root/android/app/build/outputs/apk/debug/app-debug.apk"
-output_apk="$root/output/lis-app.apk"
+output_dir="$root/output"
 rust_target=aarch64-linux-android
 port=47420
 
 export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
 
 do_daemon=true
+do_plugin=true
 do_apk=true
 
 usage() {
-    cat <<EOF
-Usage: ./install.sh [options]
+    cat <<USAGE
+Usage: ./install.sh [option]
 
-Installs lis-daemon to $bin_dir and builds the Android app into output/.
+Installs lis-daemon to $bin_dir and the OBS plugin, and builds the Android app into output/.
 
   --daemon-only   Only the PC daemon
+  --plugin-only   Only the OBS plugin
   --apk-only      Only the Android app
   -h, --help      Show this
-EOF
+USAGE
 }
 
 step() { printf '\n==> %s\n' "$*"; }
@@ -33,25 +37,25 @@ die() {
 }
 need() { command -v "$1" >/dev/null || die "$1 not found. $2"; }
 
-while (($#)); do
-    case $1 in
-        --daemon-only) do_apk=false ;;
-        --apk-only) do_daemon=false ;;
-        -h | --help)
-            usage
-            exit 0
-            ;;
-        *)
-            usage >&2
-            die "unknown option: $1"
-            ;;
-    esac
-    shift
-done
-
-if ! $do_daemon && ! $do_apk; then
-    die "--daemon-only and --apk-only can't be used together"
+if (($# > 1)); then
+    usage >&2
+    die "use one option at a time"
 fi
+
+case ${1:-} in
+    "") ;;
+    --daemon-only) do_plugin=false do_apk=false ;;
+    --plugin-only) do_daemon=false do_apk=false ;;
+    --apk-only) do_daemon=false do_plugin=false ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        usage >&2
+        die "unknown option: $1"
+        ;;
+esac
 
 install_daemon() {
     step "Building the daemon"
@@ -80,6 +84,25 @@ install_daemon() {
         fi
     else
         echo "Turn on Settings, Phone Sync in the shell to start it."
+    fi
+}
+
+install_plugin() {
+    step "Building the OBS plugin"
+    need cargo "Install Rust from https://rustup.rs"
+    need pkg-config "Install pkg-config"
+    pkg-config --exists libobs || die "OBS's headers weren't found. Install obs-studio."
+    pkg-config --exists libavcodec libavutil || die "FFmpeg's headers weren't found. Install ffmpeg."
+    (cd "$root" && cargo build --release -p lis-camera)
+
+    step "Installing the OBS plugin to $plugin_dir"
+    mkdir -p "$plugin_dir" "$output_dir"
+    install -m755 "$root/target/release/liblis_camera.so" "$plugin_dir/lis-camera.so"
+    cp "$root/target/release/liblis_camera.so" "$output_dir/lis-camera.so"
+    if pgrep -x obs >/dev/null; then
+        echo "Restart OBS to load it. Then add the Lis Camera source."
+    else
+        echo "Add the Lis Camera source in OBS."
     fi
 }
 
@@ -122,9 +145,9 @@ build_apk() {
     (cd "$root/android" && ./gradlew "${gradle_proxy_args[@]}" assembleDebug --no-daemon)
     [[ -f $built_apk ]] || die "the build finished, but there's no APK at $built_apk"
 
-    mkdir -p "$(dirname "$output_apk")"
-    cp "$built_apk" "$output_apk"
-    echo "APK: $output_apk"
+    mkdir -p "$output_dir"
+    cp "$built_apk" "$output_dir/lis-app.apk"
+    echo "APK: $output_dir/lis-app.apk"
 }
 
 # Only reads the rules, as changing them needs sudo
@@ -134,15 +157,19 @@ firewall_hint() {
     grep -q "$port" /etc/ufw/user.rules && return 0
 
     step "Firewall"
-    cat <<EOF
+    cat <<HINT
 ufw is on and has no rule for Lis App, so the phone can't reach this PC. To allow it:
   sudo ufw allow from 192.168.0.0/16 to any port $port proto tcp
   sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp
-EOF
+HINT
 }
 
 if $do_daemon; then
     install_daemon
+fi
+
+if $do_plugin; then
+    install_plugin
 fi
 
 if $do_apk; then
