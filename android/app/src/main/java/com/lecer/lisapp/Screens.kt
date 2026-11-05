@@ -354,7 +354,7 @@ private fun SetupList(state: AppState, setup: SetupState, actions: ScreenActions
     if (state.unlockKey) {
         SetupItem(
             "Fingerprint unlock is on",
-            "If it isn't offered when the PC locks, approve this phone in the PC's Phone Sync settings. The PC asks for its password once after every boot.",
+            "If it isn't offered when the PC locks, approve this phone in the PC's Phone Sync settings.",
             "Turn off",
             actions.turnOffUnlock,
         )

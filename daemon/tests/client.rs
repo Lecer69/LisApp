@@ -1317,7 +1317,7 @@ mod unlocking {
     }
 
     #[test]
-    fn the_password_is_needed_after_booting_or_when_not_locked() {
+    fn the_password_is_needed_when_the_shell_says_or_when_not_locked() {
         let (rt, pc) = start();
         let (app, _key) = approved(&rt, &pc);
 
@@ -1374,6 +1374,22 @@ mod unlocking {
         rt.block_on(pc.ok(json!({ "cmd": "unlock_disable", "fingerprint": fingerprint(&app) })));
         ask_for_prompt(&rt, &pc);
         assert_eq!(prompts(&rt, &pc, &app), 0, "no longer allowed");
+    }
+
+    #[test]
+    fn a_key_pressed_before_the_phone_connects_does_not_hold_back_the_next() {
+        let (rt, pc) = start();
+        let (app, _key) = approved(&rt, &pc);
+        app.client.disconnect();
+        rt.block_on(pc.until("the phone leaving", |status| status["phones"][0]["connected"] == json!(false)));
+
+        lock(&rt, &pc, true, false);
+        ask_for_prompt(&rt, &pc);
+
+        app.client.connect("127.0.0.1".into(), pc.port);
+        rt.block_on(pc.until("the phone coming back", |status| status["phones"][0]["connected"] == json!(true)));
+        ask_for_prompt(&rt, &pc);
+        assert_eq!(prompts(&rt, &pc, &app), 1);
     }
 
     #[test]

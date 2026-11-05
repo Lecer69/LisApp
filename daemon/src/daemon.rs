@@ -113,7 +113,7 @@ fn battery_alert(alerts: &mut BatteryAlerts, stats: &PhoneStats) -> Option<(&'st
 #[derive(Default)]
 struct LockState {
     locked: bool,
-    /// The shell wants the password, as after booting.
+    /// The shell wants the password.
     password_required: bool,
     /// Too many wrong signatures, until the next password.
     blocked: bool,
@@ -588,16 +588,21 @@ impl Daemon {
     pub fn prompt_unlock(&self) {
         let mut state = self.state.lock().unwrap();
         let quiet = state.locked_from_phone.is_some_and(|at| at.elapsed() < QUIET_AFTER_PHONE_LOCK);
-        let lock = &mut state.lock;
+        let lock = &state.lock;
         let recent = lock.last_prompt.is_some_and(|at| at.elapsed() < PROMPT_EVERY);
         if quiet || recent || !lock.locked || lock.password_required || lock.blocked {
             return;
         }
-        lock.last_prompt = Some(Instant::now());
+        let mut asked = false;
         for phone in state.trusted.iter().filter(|phone| phone.unlock_key.is_some()) {
             if let Some(link) = state.links.get(&phone.fingerprint).filter(|link| link.paired) {
                 let _ = self.outbox.send((link.handle.clone(), Message::UnlockPrompt));
+                asked = true;
             }
+        }
+        // After a boot the phone may still be connecting, and the next key press should reach it
+        if asked {
+            state.lock.last_prompt = Some(Instant::now());
         }
     }
 

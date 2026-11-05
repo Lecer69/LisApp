@@ -38,10 +38,11 @@ that keep todos, notes and goals.
 - Unlocking takes a signature, over a one-time challenge from the PC, from a key in the phone's secure
   hardware that signs only right after a strong biometric check, and stops working if a fingerprint
   is added. So neither the app's files nor the pairing key can unlock the PC. The key has to be
-  approved on the PC, which only someone at the unlocked PC can do. The first unlock after a boot
-  always takes the password, and so does the next one after 3 wrong signatures. The daemon's socket
-  has no command that unlocks, though a program already running as your user could still impersonate
-  the daemon to the shell.
+  approved on the PC, which only someone at the unlocked PC can do. It works from the first lock after
+  a boot, so on a PC that logs in by itself, the phone is enough to get in. The keyring still takes the
+  password. After 3 wrong signatures, the next unlock takes the password too. The daemon's socket has
+  no command that unlocks, though a program already running as your user could still impersonate the
+  daemon to the shell.
 
 ## Build
 
@@ -147,8 +148,8 @@ For it to pop up, allow what the app's Setup list asks for: Android's full-scree
 permissions, and on HyperOS its own pop-up and lock screen ones. Without them the phone shows a banner to
 tap. The "PC is locked" notification and the **Unlock PC** button in the app also bring up the prompt.
 
-The PC notifies you each time it's unlocked this way. The keyring stays as it was, which is why the first
-unlock after a boot takes the password.
+The PC notifies you each time it's unlocked this way. The keyring stays as it was, so after a boot it stays
+locked until you type the password, at the lock screen or when an app asks for it.
 
 ## Camera
 
