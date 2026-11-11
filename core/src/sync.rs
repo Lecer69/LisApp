@@ -396,6 +396,17 @@ mod tests {
     }
 
     #[test]
+    fn a_calendar_note_keeps_a_time_and_a_repeat_set_on_different_sides() {
+        let base = json!([{ "id": 1, "date": "2026-11-11", "text": "Dentist", "yearly": false }]);
+        let phone = json!([{ "id": 1, "date": "2026-11-11", "text": "Dentist", "yearly": false, "time": "14:30" }]);
+        let pc = json!([{ "id": 1, "date": "2026-11-11", "text": "Dentist", "yearly": false, "repeat": "weekly" }]);
+        let merged = merge("calendar", &base, &phone, &pc);
+        assert_eq!(merged[0]["time"], json!("14:30"));
+        assert_eq!(merged[0]["repeat"], json!("weekly"));
+        assert_eq!(check("calendar", &merged), Ok(()));
+    }
+
+    #[test]
     fn revisions_follow_the_content() {
         let a = json!({ "b": 1, "a": 2 });
         let b: Value = serde_json::from_str(r#"{"a":2,"b":1}"#).unwrap();

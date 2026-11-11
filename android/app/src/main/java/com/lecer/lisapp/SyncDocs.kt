@@ -170,36 +170,59 @@ data class Note(
     }
 }
 
-/** A note on a day of the shell's calendar. A yearly one shows on that day every year. */
+/** A note on a day of the shell's calendar, all day or at a time, once or repeating. */
 data class CalendarNote(
     val id: Long,
     val date: String,
     val text: String,
-    val yearly: Boolean = false,
+    /** One of [REPEATS]. */
+    val repeat: String = "none",
+    /** "HH:MM", or empty for all day. */
+    val time: String = "",
     val raw: String = "{}",
 ) {
+    /** `yearly` stays for older copies of the app; `repeat` wins where both are. */
     fun toJson(): JSONObject = JSONObject(raw)
         .put("id", id)
         .put("date", date)
         .put("text", text)
-        .put("yearly", yearly)
+        .put("yearly", repeat == "yearly")
+        .apply {
+            if (repeat == "none") remove("repeat") else put("repeat", repeat)
+            if (time.isEmpty()) remove("time") else put("time", time)
+        }
 
-    /** As the shell matches them: a yearly Feb 29 shows on Feb 28 in other years. */
+    /** As the shell matches them: a yearly Feb 29 shows on Feb 28 in other years, a monthly 31st on a short month's last day. */
     fun fallsOn(day: LocalDate): Boolean {
         val key = day.toString()
         if (date == key) return true
-        if (!yearly) return false
-        val monthDay = date.drop(5)
-        if (monthDay == key.drop(5)) return true
-        return monthDay == "02-29" && key.drop(5) == "02-28" && !day.isLeapYear
+        return when (repeat) {
+            "yearly" -> {
+                val monthDay = date.drop(5)
+                monthDay == key.drop(5) || (monthDay == "02-29" && key.drop(5) == "02-28" && !day.isLeapYear)
+            }
+            "weekly", "monthly" -> {
+                val start = runCatching { LocalDate.parse(date) }.getOrNull()
+                when {
+                    start == null || day.isBefore(start) -> false
+                    repeat == "weekly" -> start.dayOfWeek == day.dayOfWeek
+                    else -> minOf(start.dayOfMonth, day.lengthOfMonth()) == day.dayOfMonth
+                }
+            }
+            else -> false
+        }
     }
 
     companion object {
+        val REPEATS = listOf("none", "weekly", "monthly", "yearly")
+        private val TIME = Regex("\\d{2}:\\d{2}")
+
         fun from(json: JSONObject) = CalendarNote(
             id = json.optLong("id"),
             date = json.optString("date"),
             text = json.optString("text"),
-            yearly = json.optBoolean("yearly"),
+            repeat = json.optString("repeat").takeIf { it in REPEATS } ?: if (json.optBoolean("yearly")) "yearly" else "none",
+            time = json.optString("time").takeIf { TIME.matches(it) } ?: "",
             raw = json.toString(),
         )
     }

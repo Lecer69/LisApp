@@ -109,6 +109,9 @@ Before each change from a phone, the daemon keeps the old file in
 `~/.local/share/lis-app/sync-backups`, the last 10 of each. A file over about 900 KB doesn't sync, and
 the app says so. Unpairing removes the phone's copies and leaves the PC's.
 
+Calendar notes can have a time, and repeat weekly, monthly or yearly. Reminders and the morning summary come
+from the PC only.
+
 Reordering and restoring from the trash are only in the shell. A private note is covered on the phone
 as in the shell, which isn't encryption.
 

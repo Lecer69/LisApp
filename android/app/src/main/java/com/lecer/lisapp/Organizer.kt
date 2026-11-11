@@ -1,5 +1,8 @@
 package com.lecer.lisapp
 
+import android.app.TimePickerDialog
+import android.content.Context
+import android.content.DialogInterface
 import androidx.activity.compose.BackHandler
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.background
@@ -39,6 +42,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
@@ -48,6 +52,7 @@ import androidx.compose.ui.unit.sp
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalTime
 import java.time.YearMonth
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -592,6 +597,19 @@ private fun SubgoalRow(goalId: Long, subgoal: Subgoal) {
 private val MonthFormat = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH)
 private val LongDayFormat = DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.ENGLISH)
 private val UpcomingFormat = DateTimeFormatter.ofPattern("EEE, MMM d", Locale.ENGLISH)
+private val RepeatNames = mapOf("weekly" to "Weekly", "monthly" to "Monthly", "yearly" to "Yearly")
+
+private fun nextRepeat(repeat: String): String =
+    CalendarNote.REPEATS[(CalendarNote.REPEATS.indexOf(repeat) + 1) % CalendarNote.REPEATS.size]
+
+/** The system's time picker; "No time" makes it all day. */
+private fun pickTime(context: Context, current: String, set: (String) -> Unit) {
+    val parts = current.split(":").mapNotNull { it.toIntOrNull() }
+    val (hour, minute) = if (parts.size == 2) parts[0] to parts[1] else LocalTime.now().hour + 1 to 0
+    val dialog = TimePickerDialog(context, { _, h, m -> set(String.format(Locale.ROOT, "%02d:%02d", h, m)) }, hour % 24, minute, true)
+    dialog.setButton(DialogInterface.BUTTON_NEUTRAL, "No time") { _, _ -> set("") }
+    dialog.show()
+}
 private const val UPCOMING_DAYS = 30L
 private const val SWIPE_PX = 120f
 
@@ -602,17 +620,19 @@ private fun CalendarPage(close: () -> Unit) {
     val today = LocalDate.now()
     var month by remember { mutableStateOf(YearMonth.from(today)) }
     var selected by remember { mutableStateOf(today) }
-    var yearly by remember { mutableStateOf(false) }
+    var repeat by remember { mutableStateOf("none") }
+    var time by remember { mutableStateOf("") }
+    val context = LocalContext.current
 
     val firstDay = if (settings.weekStartsMonday) DayOfWeek.MONDAY else DayOfWeek.SUNDAY
     val start = month.atDay(1).let { first ->
         first.minusDays(((first.dayOfWeek.value - firstDay.value + 7) % 7).toLong())
     }
     val cells = (0 until 42).map { start.plusDays(it.toLong()) }
-    val dayNotes = notes.filter { it.fallsOn(selected) }
+    val dayNotes = notes.filter { it.fallsOn(selected) }.sortedBy { it.time }
     val upcoming = (1..UPCOMING_DAYS).flatMap { offset ->
         val day = today.plusDays(offset)
-        notes.filter { it.fallsOn(day) }.map { day to it }
+        notes.filter { it.fallsOn(day) }.sortedBy { it.time }.map { day to it }
     }.take(6)
 
     fun select(day: LocalDate) {
@@ -688,11 +708,13 @@ private fun CalendarPage(close: () -> Unit) {
 
         AddField("Add a note…", add = { text ->
             val id = SyncDocs.newId()
-            val note = CalendarNote(id, selected.toString(), text, yearly)
+            val note = CalendarNote(id, selected.toString(), text, repeat, time)
             SyncDocs.calendar.edit { list -> list + note }
-            yearly = false
+            repeat = "none"
+            time = ""
         }) {
-            Chip("Yearly", yearly) { yearly = !yearly }
+            Chip(time.ifEmpty { "Time" }, time.isNotEmpty()) { pickTime(context, time) { time = it } }
+            Chip(RepeatNames[repeat] ?: "Repeat", repeat != "none") { repeat = nextRepeat(repeat) }
         }
 
         if (upcoming.isNotEmpty()) {
@@ -704,7 +726,12 @@ private fun CalendarPage(close: () -> Unit) {
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         Text(UpcomingFormat.format(day), fontSize = 13.sp, color = Theme.textDim, modifier = Modifier.width(96.dp))
-                        Text(note.text, fontSize = 14.sp, color = Theme.text, modifier = Modifier.weight(1f))
+                        Text(
+                            if (note.time.isEmpty()) note.text else "${note.time}  ${note.text}",
+                            fontSize = 14.sp,
+                            color = Theme.text,
+                            modifier = Modifier.weight(1f),
+                        )
                     }
                 }
             }
@@ -773,6 +800,10 @@ private fun DayCell(
 @Composable
 private fun CalendarNoteRow(note: CalendarNote) {
     var editing by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val update: ((CalendarNote) -> CalendarNote) -> Unit = { change ->
+        SyncDocs.calendar.edit { list -> list.map { if (it.id == note.id) change(it) else it } }
+    }
     Row(
         modifier = Modifier.fillMaxWidth().clip(RowShape).background(Theme.hover).padding(start = 14.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -787,8 +818,11 @@ private fun CalendarNoteRow(note: CalendarNote) {
                 .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { editing = true }
                 .padding(horizontal = 12.dp, vertical = 12.dp),
         )
-        Chip("Yearly", note.yearly) {
-            SyncDocs.calendar.edit { list -> list.map { if (it.id == note.id) it.copy(yearly = !it.yearly) else it } }
+        Chip(note.time.ifEmpty { "Time" }, note.time.isNotEmpty()) {
+            pickTime(context, note.time) { time -> update { it.copy(time = time) } }
+        }
+        Chip(RepeatNames[note.repeat] ?: "Repeat", note.repeat != "none") {
+            update { it.copy(repeat = nextRepeat(it.repeat)) }
         }
         IconTap(R.drawable.ic_close, "Remove", {
             SyncDocs.calendar.edit { list -> list.filterNot { it.id == note.id } }
