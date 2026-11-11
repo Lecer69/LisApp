@@ -2,7 +2,7 @@
 
 Connects an Android phone to a lis desktop over the local network or a USB cable: phone stats and
 battery alerts on the PC, files both ways, locking and unlocking the PC from the phone, finding the
-phone, the shell's todos, notes and goals on the phone, the PC's media on the phone's lock screen,
+phone, the shell's todos, notes, goals and calendar on the phone, the PC's media on the phone's lock screen,
 action buttons, and the phone's camera as an OBS source. It replaces KDE Connect and DroidCam for
 these.
 
@@ -18,7 +18,7 @@ android/   Kotlin and Compose: the system hooks and the screens
 ```
 
 The shell side lives in the lis config: `phone/`, `settings/pages/PhonePage.qml`, and the services
-that keep todos, notes and goals.
+that keep todos, notes, goals and calendar notes.
 
 ## Security
 
@@ -71,20 +71,31 @@ sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp
 1. In the shell: Settings, Phone Sync, turn it on, press Pair.
 2. In the app: choose the PC, or enter its address.
 3. Check that both show the same code, and accept on both.
-4. In the app's Setup list, allow notifications, background use and Autostart.
+4. In the app's Settings (the gear on its home screen), allow notifications, background use and, on
+   HyperOS, Autostart. The gear has a red dot while something it needs isn't allowed.
+
+## Settings
+
+The gear on the app's home screen. Besides the permissions above, it sets the theme (the system's, dark
+or light), what the home screen shows, whether the connection lasts when you leave the app and starts
+with the phone, how often the phone's figures go to the PC, which notifications show, the PC's media on
+the lock screen and its volume step, how long and how loud Find my phone rings, the camera's defaults,
+and the first day of the calendar's week. It also shows the paired PC, and unpairs it.
 
 ## Find my phone
 
 **Find Phone** in the shell's Phone panel rings it as an alarm, at full volume and with vibration,
-which sounds even on silent. It stops from the phone or the panel, or by itself after a minute. Total
-silence Do Not Disturb can still mute alarms.
+which sounds even on silent. It stops from the phone or the panel, or by itself after a minute. The
+app's Settings can change how long, and turn off the full volume or the vibration. Total silence Do
+Not Disturb can still mute alarms.
 
 The PC notifies you once when the phone's battery falls to 20% and to 10%, and when it's charged to
 100%.
 
-## Todos, notes and goals
+## Todos, notes, goals and calendar
 
-These are the shell's own files, `todo.json`, `notes.json` and `goals.json` in `~/.config/lis`, so the
+These are the shell's own files, `todo.json`, `notes.json`, `goals.json` and `calendar.json` in
+`~/.config/lis`, so the
 phone and the shell show the same things. The phone keeps a copy and works without the PC. Changes go
 out within a second or two of a save, and catch up on reconnecting.
 
@@ -136,7 +147,7 @@ it on, the app doesn't go looking on the network, so turn it off to go back to W
 
 ## Phone unlock
 
-1. In the app's Setup list: **Unlock the PC with your fingerprint**.
+1. In the app's Settings, under Fingerprint Unlock: **Unlock the PC with your fingerprint**.
 2. In the shell: Settings, Phone Sync, Phone Unlock, **Allow**.
 
 Then the fingerprint prompt pops up on the phone when you lock the PC by hand, and when you press a key
@@ -144,7 +155,7 @@ at its lock screen, as that first prompt will be long gone when you come back. I
 locks itself after being idle, or when you lock it from the phone, and it stays away for 20 seconds
 after you dismiss it. While the camera is running it won't cover the picture.
 
-For it to pop up, allow what the app's Setup list asks for: Android's full-screen and draw-over
+For it to pop up, allow what the app's Settings ask for there: Android's full-screen and draw-over
 permissions, and on HyperOS its own pop-up and lock screen ones. Without them the phone shows a banner to
 tap. The "PC is locked" notification and the **Unlock PC** button in the app also bring up the prompt.
 

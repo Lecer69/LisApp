@@ -67,10 +67,11 @@ object Lis {
 
     fun init(context: Context) {
         appContext = context.applicationContext
+        Prefs.init(appContext)
         Notifications.createChannels(appContext)
         client = LisClient(appContext.filesDir.absolutePath, deviceName(appContext), Listener())
         val usb = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getBoolean(PREFERENCE_USB, false)
-        update { copy(usbMode = usb, unlockKey = Unlocker.hasKey()) }
+        update { copy(usbMode = usb, unlockKey = Unlocker.hasKey(), camera = camera.copy(front = Prefs.current.cameraFront)) }
         refreshPaired()
         SyncDocs.reloadAll()
     }

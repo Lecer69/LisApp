@@ -8,6 +8,7 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -16,10 +17,18 @@ import android.provider.Settings
 import android.view.Surface
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,11 +41,9 @@ import java.security.GeneralSecurityException
 
 class MainActivity : ComponentActivity() {
     private var setup by mutableStateOf(SetupState())
-    private var showCamera by mutableStateOf(false)
-    private var wantedFps by mutableStateOf(DEFAULT_FPS)
-    private var wantedSize by mutableStateOf(DEFAULT_CAMERA_SIZE)
-    private var aspect by mutableStateOf(CameraAspect.AUTO)
-    private var page by mutableStateOf<OrganizerPage?>(null)
+    private var screen by mutableStateOf<Screen>(Screen.Home)
+    /** The file chooser covers the app, which isn't leaving it. */
+    private var pickingFiles = false
 
     private val camera by lazy { CameraStreamer(applicationContext) }
     private var previewSurface: Surface? = null
@@ -54,76 +61,106 @@ class MainActivity : ComponentActivity() {
     }
 
     private val pickFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        pickingFiles = false
         uris.forEach { Transfers.send(this, it) }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val screenActions = ScreenActions(
+            pair = { host, port -> Lis.pairWith(host, port) },
+            answerCode = Lis::answerCode,
+            lockPc = { Lis.client.lockPc() },
+            sendFile = ::sendFile,
+            openCamera = ::openCamera,
+            openPage = { screen = Screen.Organizer(it) },
+            openSettings = { screen = Screen.Settings },
+            stopRinging = { Ringer.stop(this) },
+            mediaCommand = { Lis.client.mediaCommand(it) },
+            setVolume = { Lis.client.mediaSetVolume(it.toUByte()) },
+            runAction = { Lis.client.runAction(it) },
+            unlockPc = ::unlockPc,
+        )
+        val settingsActions = SettingsActions(
+            back = { screen = Screen.Home },
+            setUsb = Lis::setUsbMode,
+            reconnect = Lis::connectToPc,
+            turnOnUnlock = ::turnOnUnlock,
+            turnOffUnlock = ::turnOffUnlock,
+            allowPopUp = ::allowPopUp,
+            openHyperOsPermissions = ::openHyperOsPermissions,
+            askNotifications = ::askNotifications,
+            openNotificationSettings = ::openNotificationSettings,
+            askBackground = ::askBackground,
+            openAutostart = ::openAutostart,
+            openAppSettings = ::openAppSettings,
+            refreshMedia = { MediaRemote.refresh(applicationContext) },
+            unpair = {
+                Lis.unpair()
+                refreshSetup()
+                screen = Screen.Home
+            },
+        )
+        val cameraActions = CameraActions(
+            close = ::closeCamera,
+            start = ::requestCamera,
+            stop = ::stopCamera,
+            switchCamera = ::switchCamera,
+            setFps = { fps -> Prefs.update { copy(cameraFps = fps) } },
+            setSize = { size -> Prefs.update { copy(cameraHeight = size.height) } },
+            setAspect = { wanted ->
+                Prefs.update { copy(cameraAspect = wanted) }
+                camera.setAspect(wanted)
+            },
+            sizes = camera::sizes,
+            surface = ::onPreviewSurface,
+        )
+
         setContent {
             val state by Lis.state.collectAsState()
-            LisTheme {
-                if (showCamera) {
-                    BackHandler(onBack = ::closeCamera)
-                    CameraScreen(
-                        state = state,
-                        wantedFps = wantedFps,
-                        wantedSize = wantedSize,
-                        aspect = aspect,
-                        actions = CameraActions(
-                            close = ::closeCamera,
-                            start = ::requestCamera,
-                            stop = ::stopCamera,
-                            switchCamera = ::switchCamera,
-                            setFps = { wantedFps = it },
-                            setSize = { wantedSize = it },
-                            setAspect = {
-                                aspect = it
-                                camera.setAspect(it)
-                            },
-                            sizes = camera::sizes,
-                            surface = ::onPreviewSurface,
-                        ),
-                    )
-                    return@LisTheme
+            val settings by Prefs.settings.collectAsState()
+            val light = settings.theme.light(isSystemInDarkTheme())
+            LaunchedEffect(light) { styleWindow(light) }
+
+            LisTheme(light) {
+                AnimatedContent(
+                    targetState = screen,
+                    transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) },
+                    label = "screen",
+                ) { shown ->
+                    when (shown) {
+                        Screen.Camera -> {
+                            BackHandler(onBack = ::closeCamera)
+                            CameraScreen(
+                                state = state,
+                                wantedFps = settings.cameraFps,
+                                wantedSize = settings.cameraSize,
+                                aspect = settings.cameraAspect,
+                                actions = cameraActions,
+                            )
+                        }
+                        is Screen.Organizer -> {
+                            BackHandler(onBack = ::closePage)
+                            OrganizerScreen(shown.page, ::closePage)
+                        }
+                        Screen.Settings -> {
+                            BackHandler { screen = Screen.Home }
+                            SettingsScreen(state, settings, setup, settingsActions)
+                        }
+                        Screen.Home -> LisScreen(state, settings, setup, screenActions)
+                    }
                 }
-                page?.let { open ->
-                    BackHandler { closePage() }
-                    OrganizerScreen(open, ::closePage)
-                    return@LisTheme
-                }
-                LisScreen(
-                    state = state,
-                    setup = setup,
-                    actions = ScreenActions(
-                        pair = { host, port -> Lis.pairWith(host, port) },
-                        answerCode = Lis::answerCode,
-                        lockPc = { Lis.client.lockPc() },
-                        sendFile = { pickFiles.launch(arrayOf("*/*")) },
-                        openCamera = ::openCamera,
-                        openPage = { page = it },
-                        stopRinging = { Ringer.stop(this) },
-                        setUsb = Lis::setUsbMode,
-                        mediaCommand = { Lis.client.mediaCommand(it) },
-                        setVolume = { Lis.client.mediaSetVolume(it.toUByte()) },
-                        runAction = { Lis.client.runAction(it) },
-                        unlockPc = ::unlockPc,
-                        turnOnUnlock = ::turnOnUnlock,
-                        turnOffUnlock = ::turnOffUnlock,
-                        allowPopUp = ::allowPopUp,
-                        openHyperOsPermissions = ::openHyperOsPermissions,
-                        unpair = {
-                            Lis.unpair()
-                            refreshSetup()
-                        },
-                        askNotifications = ::askNotifications,
-                        askBackground = ::askBackground,
-                        openAutostart = ::openAutostart,
-                    ),
-                )
             }
         }
         handleShare(intent)
+    }
+
+    /** The bars' icons and the window behind the app follow the app's theme, which can differ from the system's. */
+    private fun styleWindow(light: Boolean) {
+        val bars = if (light) SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT) else SystemBarStyle.dark(Color.TRANSPARENT)
+        enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
+        window.decorView.setBackgroundColor(if (light) LIGHT_WINDOW else DARK_WINDOW)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -134,14 +171,24 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        refreshSetup()
         SyncService.start(this)
         SyncDocs.checkDay()
     }
 
+    /** Also on coming back from a system settings page, some of which only pause the app. */
+    override fun onResume() {
+        super.onResume()
+        refreshSetup()
+    }
+
     private fun closePage() {
         SyncDocs.flushAll()
-        page = null
+        screen = Screen.Home
+    }
+
+    private fun sendFile() {
+        pickingFiles = true
+        pickFiles.launch(arrayOf("*/*"))
     }
 
     private fun unlockPc() {
@@ -168,12 +215,16 @@ class MainActivity : ComponentActivity() {
         Lis.update { copy(unlockKey = false, unlockMessage = null) }
     }
 
-    /** The camera never runs off screen. Without a paired PC, there's nothing to stay connected for. */
+    /**
+     * The camera never runs off screen. Without a paired PC, there's nothing to stay connected for,
+     * and the connection can be set to last only while the app is open.
+     */
     override fun onStop() {
         stopCamera()
         SyncDocs.flushAll()
         super.onStop()
-        if (Lis.client.pairedPc() == null && !isChangingConfigurations) {
+        val leaving = Lis.client.pairedPc() == null || !Prefs.current.keepConnected
+        if (leaving && !isChangingConfigurations && !pickingFiles) {
             Lis.client.disconnect()
             SyncService.stop(this)
         }
@@ -182,14 +233,16 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("SourceLockedOrientationActivity")
     private fun openCamera() {
         Lis.onCameraRefused = { runOnUiThread(::stopCamera) }
-        Lis.update { copy(camera = camera.copy(error = null)) }
+        val front = Prefs.current.cameraFront
+        Lis.update { copy(camera = camera.copy(error = null, front = if (camera.running) camera.front else front)) }
+        camera.setAspect(Prefs.current.cameraAspect)
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
-        showCamera = true
+        screen = Screen.Camera
     }
 
     private fun closeCamera() {
         stopCamera()
-        showCamera = false
+        screen = Screen.Home
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
     }
 
@@ -209,7 +262,8 @@ class MainActivity : ComponentActivity() {
     private fun startCamera(front: Boolean = Lis.state.value.camera.front) {
         val surface = previewSurface ?: return
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        camera.start(surface, front, wantedSize, wantedFps)
+        val settings = Prefs.current
+        camera.start(surface, front, settings.cameraSize, settings.cameraFps)
     }
 
     private fun stopCamera() {
@@ -219,6 +273,7 @@ class MainActivity : ComponentActivity() {
 
     private fun switchCamera() {
         val status = Lis.state.value.camera
+        Prefs.update { copy(cameraFront = !status.front) }
         if (status.running) {
             startCamera(front = !status.front)
         } else {
@@ -284,6 +339,11 @@ class MainActivity : ComponentActivity() {
         if (!tryOpen(autostart)) openAppSettings()
     }
 
+    private fun openNotificationSettings() {
+        val page = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        if (!tryOpen(page)) openAppSettings()
+    }
+
     private fun openAppSettings() {
         open(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()))
     }
@@ -302,6 +362,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private companion object {
-        const val DEFAULT_FPS = 60
+        val DARK_WINDOW = 0xFF0F0F0F.toInt()
+        val LIGHT_WINDOW = 0xFFF5F5F5.toInt()
     }
 }

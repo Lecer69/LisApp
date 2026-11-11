@@ -4,29 +4,23 @@ import android.util.Size
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.Button
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface as Material
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -88,80 +82,72 @@ private fun statusText(state: AppState, wantedFps: Int): String {
     }
 }
 
-/** Scrolls sideways, as a phone's width doesn't always fit them all. */
-@Composable
-private fun <T> ChoiceRow(options: List<T>, selected: T?, enabled: Boolean, label: (T) -> String, pick: (T) -> Unit) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-    ) {
-        options.forEach { option ->
-            FilterChip(
-                selected = option == selected,
-                enabled = enabled,
-                onClick = { pick(option) },
-                label = { Text(label(option)) },
-            )
-        }
-    }
-}
-
 @Composable
 fun CameraScreen(state: AppState, wantedFps: Int, wantedSize: Size, aspect: CameraAspect, actions: CameraActions) {
     val camera = state.camera
     val connected = state.connection == ConnectionState.CONNECTED
     val sizes = remember(camera.front) { actions.sizes(camera.front) }
+    val shape = RoundedCornerShape(12.dp)
 
-    Material(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        Column(
-            modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+    ScreenColumn(scroll = false, spacing = 10.dp) {
+        ScreenHeader(
+            "Camera",
+            when {
+                camera.running && camera.live -> "Live"
+                camera.running -> "Starting…"
+                else -> if (camera.front) "Front camera" else "Back camera"
+            },
+            back = actions.close,
+        )
+
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .clip(shape)
+                .border(1.dp, Theme.border, shape),
+            contentAlignment = Alignment.Center,
         ) {
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("Camera", fontSize = 24.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                TextButton(onClick = actions.close) { Text("Close") }
-            }
+            AndroidView(
+                factory = { context ->
+                    SurfaceView(context).apply {
+                        holder.setFixedSize(PREVIEW_WIDTH, PREVIEW_HEIGHT)
+                        holder.addCallback(object : SurfaceHolder.Callback {
+                            override fun surfaceCreated(created: SurfaceHolder) = actions.surface(created.surface)
 
-            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                AndroidView(
-                    factory = { context ->
-                        SurfaceView(context).apply {
-                            holder.setFixedSize(PREVIEW_WIDTH, PREVIEW_HEIGHT)
-                            holder.addCallback(object : SurfaceHolder.Callback {
-                                override fun surfaceCreated(created: SurfaceHolder) = actions.surface(created.surface)
+                            override fun surfaceChanged(changed: SurfaceHolder, format: Int, width: Int, height: Int) {}
 
-                                override fun surfaceChanged(changed: SurfaceHolder, format: Int, width: Int, height: Int) {}
-
-                                override fun surfaceDestroyed(destroyed: SurfaceHolder) = actions.surface(null)
-                            })
-                        }
-                    },
-                    // The screen stays portrait here, whichever way round the picture is sent
-                    modifier = Modifier.aspectRatio(PREVIEW_HEIGHT.toFloat() / PREVIEW_WIDTH),
-                )
-            }
-
-            Text(
-                statusText(state, wantedFps),
-                fontSize = 14.sp,
-                color = if (camera.error != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                            override fun surfaceDestroyed(destroyed: SurfaceHolder) = actions.surface(null)
+                        })
+                    }
+                },
+                // The screen stays portrait here, whichever way round the picture is sent
+                modifier = Modifier.aspectRatio(PREVIEW_HEIGHT.toFloat() / PREVIEW_WIDTH),
             )
-
-            ChoiceRow(sizes, closestSize(sizes, wantedSize), !camera.running, { it.label }, actions.setSize)
-            ChoiceRow(listOf(60, 30), wantedFps, !camera.running, { "$it fps" }, actions.setFps)
-            ChoiceRow(CameraAspect.entries, aspect, true, { it.label }, actions.setAspect)
-
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                if (camera.running) {
-                    Button(onClick = actions.stop, modifier = Modifier.weight(1f)) { Text("Stop") }
-                } else {
-                    Button(enabled = connected, onClick = actions.start, modifier = Modifier.weight(1f)) { Text("Start") }
-                }
-                OutlinedButton(onClick = actions.switchCamera, modifier = Modifier.weight(1f)) {
-                    Text(if (camera.front) "Use back camera" else "Use front camera")
-                }
+            if (!camera.running) {
+                Text("Press Start to show the picture", fontSize = 14.sp, color = Theme.textDim)
             }
+        }
+
+        StatusLine(statusText(state, wantedFps), error = camera.error != null)
+
+        Column(modifier = Modifier.offset(x = (-12).dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Chips(sizes, closestSize(sizes, wantedSize), { it.label }, enabled = !camera.running, pick = actions.setSize)
+            Chips(listOf(60, 30), wantedFps, { "$it fps" }, enabled = !camera.running, pick = actions.setFps)
+            Chips(CameraAspect.entries, aspect, { it.label }, pick = actions.setAspect)
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+            if (camera.running) {
+                LisButton("Stop", actions.stop, modifier = Modifier.weight(1f).heightIn(min = 48.dp))
+            } else {
+                LisButton("Start", actions.start, modifier = Modifier.weight(1f).heightIn(min = 48.dp), enabled = connected)
+            }
+            LisButton(
+                if (camera.front) "Back Camera" else "Front Camera",
+                actions.switchCamera,
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+            )
         }
     }
 }

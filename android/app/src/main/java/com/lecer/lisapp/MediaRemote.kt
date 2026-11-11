@@ -18,7 +18,6 @@ import uniffi.lis_ffi.MediaInfo
  * while it's there the phone's volume buttons turn the PC's volume, as with a Chromecast.
  */
 object MediaRemote {
-    private const val VOLUME_STEP = 5
     private const val MAX_VOLUME = 100
     private const val ACTION_VOLUME_UP = "volume_up"
     private const val ACTION_VOLUME_DOWN = "volume_down"
@@ -44,8 +43,8 @@ object MediaRemote {
         override fun onCustomAction(action: String, extras: android.os.Bundle?) {
             val current = volume?.currentVolume ?: return
             when (action) {
-                ACTION_VOLUME_UP -> setVolume(current + VOLUME_STEP)
-                ACTION_VOLUME_DOWN -> setVolume(current - VOLUME_STEP)
+                ACTION_VOLUME_UP -> setVolume(current + Prefs.current.volumeStep)
+                ACTION_VOLUME_DOWN -> setVolume(current - Prefs.current.volumeStep)
             }
         }
     }
@@ -56,7 +55,7 @@ object MediaRemote {
             val provider = object : VolumeProvider(VOLUME_CONTROL_ABSOLUTE, MAX_VOLUME, 0) {
                 override fun onSetVolumeTo(target: Int) = setVolume(target)
                 override fun onAdjustVolume(direction: Int) {
-                    if (direction != 0) setVolume(currentVolume + direction * VOLUME_STEP)
+                    if (direction != 0) setVolume(currentVolume + direction * Prefs.current.volumeStep)
                 }
             }
             created.setPlaybackToRemote(provider)
@@ -93,8 +92,10 @@ object MediaRemote {
         return builder.build()
     }
 
+    /** Hidden when turned off in the settings, and kept to show again when turned back on. */
     private fun publish(context: Context) {
         val info = media ?: return
+        if (!Prefs.current.mediaControls) return hide(context)
         val open = openSession(context)
         volume?.currentVolume = info.volumePercent.toInt().coerceIn(0, MAX_VOLUME)
         open.setMetadata(metadata(info))
@@ -125,12 +126,21 @@ object MediaRemote {
         main.post { end(context) }
     }
 
-    private fun end(context: Context) {
+    /** After the setting changed. */
+    fun refresh(context: Context) {
+        main.post { publish(context) }
+    }
+
+    private fun hide(context: Context) {
         Notifications.cancelMedia(context)
         session?.isActive = false
         session?.release()
         session = null
         volume = null
+    }
+
+    private fun end(context: Context) {
+        hide(context)
         media = null
         art = null
     }

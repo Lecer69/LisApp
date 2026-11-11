@@ -1,34 +1,31 @@
 package com.lecer.lisapp
 
+import androidx.activity.compose.BackHandler
+import androidx.annotation.DrawableRes
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -39,88 +36,93 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.time.DayOfWeek
+import java.time.Instant
+import java.time.LocalDate
+import java.time.YearMonth
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
-/** The shell's own todos, notes and goals. They work without the PC, and catch up when it's back. */
-enum class OrganizerPage(val title: String) {
-    TODOS("Todos"),
-    NOTES("Notes"),
-    GOALS("Goals"),
+/** The shell's todos, notes, goals and calendar. They work without the PC, and catch up when it's back. */
+enum class OrganizerPage(val title: String, @DrawableRes val icon: Int) {
+    TODOS("Todos", R.drawable.ic_todo),
+    NOTES("Notes", R.drawable.ic_notes),
+    GOALS("Goals", R.drawable.ic_goals),
+    CALENDAR("Calendar", R.drawable.ic_calendar),
 }
 
 @Composable
 fun OrganizerScreen(page: OrganizerPage, close: () -> Unit) {
-    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        when (page) {
-            OrganizerPage.TODOS -> TodosPage(close)
-            OrganizerPage.NOTES -> NotesPage(close)
-            OrganizerPage.GOALS -> GoalsPage(close)
-        }
+    when (page) {
+        OrganizerPage.TODOS -> TodosPage(close)
+        OrganizerPage.NOTES -> NotesPage(close)
+        OrganizerPage.GOALS -> GoalsPage(close)
+        OrganizerPage.CALENDAR -> CalendarPage(close)
     }
 }
 
+private val RowShape = RoundedCornerShape(8.dp)
+
+/** A word to press, like the shell's small text buttons. */
 @Composable
-private fun PageColumn(content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+private fun SmallAction(text: String, danger: Boolean = false, onClick: () -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    Box(
+        modifier = Modifier
+            .clip(RowShape)
+            .background(if (pressed) Theme.hover else Color.Transparent)
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .heightIn(min = 36.dp)
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        content()
+        Text(text, fontSize = 14.sp, color = if (danger) Theme.danger else Theme.faint)
     }
 }
 
+/** A row of a list: lit while pressed or open. Only its line opens it, not the details under it. */
 @Composable
-private fun PageHeader(title: String, subtitle: String, close: () -> Unit) {
-    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
-            if (subtitle.isNotEmpty()) Dim(subtitle)
+private fun ItemRow(
+    open: Boolean = false,
+    onClick: () -> Unit,
+    details: @Composable () -> Unit = {},
+    content: @Composable () -> Unit,
+) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RowShape)
+            .background(if (open || pressed) Theme.hover else Color.Transparent),
+    ) {
+        Box(modifier = Modifier.fillMaxWidth().clickable(interactionSource = source, indication = null, onClick = onClick)) {
+            content()
         }
-        TextButton(onClick = close) { Text("Close") }
+        details()
     }
 }
 
 @Composable
-private fun Dim(text: String, maxLines: Int = Int.MAX_VALUE) {
+private fun Empty(text: String) {
     Text(
         text,
-        fontSize = 13.sp,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        maxLines = maxLines,
-        overflow = TextOverflow.Ellipsis,
+        fontSize = 14.sp,
+        color = Theme.textDim,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 32.dp),
     )
-}
-
-/** A task or a goal is one line, as in the shell. */
-private fun oneLine(text: String): String = text.replace(Regex("[\\r\\n]+"), " ").trim()
-
-@Composable
-private fun AddRow(hint: String, add: (String) -> Unit) {
-    var text by remember { mutableStateOf("") }
-    val submit: () -> Unit = {
-        val clean = oneLine(text)
-        if (clean.isNotEmpty()) {
-            add(clean)
-            text = ""
-        }
-    }
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedTextField(
-            value = text,
-            onValueChange = { text = it },
-            singleLine = true,
-            placeholder = { Text(hint) },
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = { submit() }),
-            modifier = Modifier.weight(1f),
-        )
-        OutlinedButton(enabled = text.isNotBlank(), onClick = submit) { Text("Add") }
-    }
 }
 
 /**
@@ -138,48 +140,16 @@ private fun EditField(
 ) {
     var text by remember { mutableStateOf(current().orEmpty()) }
     LaunchedEffect(external) { current()?.let { text = it } }
-    OutlinedTextField(
+    Field(
         value = text,
-        onValueChange = {
+        onChange = {
             text = it
             onChange(it)
         },
         singleLine = singleLine,
-        placeholder = { Text(placeholder) },
+        placeholder = placeholder,
+        fontSize = 14.sp,
         modifier = modifier,
-    )
-}
-
-@Composable
-private fun ConfirmDialog(title: String, text: String, action: String, confirm: () -> Unit, dismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = dismiss,
-        title = { Text(title) },
-        text = { Text(text) },
-        confirmButton = {
-            TextButton(onClick = {
-                dismiss()
-                confirm()
-            }) { Text(action, color = MaterialTheme.colorScheme.error) }
-        },
-        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun NameDialog(title: String, initial: String, save: (String) -> Unit, dismiss: () -> Unit) {
-    var name by remember { mutableStateOf(initial) }
-    AlertDialog(
-        onDismissRequest = dismiss,
-        title = { Text(title) },
-        text = { OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true) },
-        confirmButton = {
-            TextButton(enabled = name.isNotBlank(), onClick = {
-                dismiss()
-                save(name.trim())
-            }) { Text("Save") }
-        },
-        dismissButton = { TextButton(onClick = dismiss) { Text("Cancel") } },
     )
 }
 
@@ -199,48 +169,60 @@ private fun TodosPage(close: () -> Unit) {
     val shown = doc.listed(current)
     val open = shown.count { !it.done }
 
-    PageColumn {
-        PageHeader("Todos", if (shown.isEmpty()) "" else "$open open", close)
+    ScreenColumn(scroll = false, spacing = 8.dp) {
+        ScreenHeader("Todos", if (shown.isEmpty()) null else "$open open", back = close)
 
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        ) {
-            FilterChip(selected = current == NO_LIST, onClick = { list = NO_LIST }, label = { Text("All") })
-            doc.lists.forEach { item ->
-                FilterChip(selected = current == item.id, onClick = { list = item.id }, label = { Text(item.name) })
-            }
-            FilterChip(selected = false, onClick = { naming = true }, label = { Text("New list") })
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Chips(
+                options = listOf(NO_LIST) + doc.lists.map { it.id },
+                selected = current,
+                name = { id -> if (id == NO_LIST) "All" else doc.lists.firstOrNull { it.id == id }?.name ?: "" },
+                modifier = Modifier.weight(1f),
+            ) { list = it }
+            IconTap(R.drawable.ic_plus, "New list", { naming = true }, size = 40.dp, iconSize = 18.dp, tint = Theme.faint)
         }
 
         if (current != NO_LIST && current != DAILY_LIST) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { renaming = true }) { Text("Rename list") }
-                TextButton(onClick = { removing = true }) { Text("Delete list", color = MaterialTheme.colorScheme.error) }
+            Row(modifier = Modifier.offset(x = (-12).dp)) {
+                SmallAction("Rename list") { renaming = true }
+                SmallAction("Delete list", danger = true) { removing = true }
             }
         }
 
-        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            if (shown.isEmpty()) {
+                item { Empty(if (current == NO_LIST) "No tasks yet" else "Nothing in this list") }
+            }
             items(shown, key = { it.id }) { task ->
-                TaskRow(task, doc.lists, opened == task.id) { opened = if (opened == task.id) null else task.id }
+                TaskRow(
+                    task = task,
+                    lists = doc.lists,
+                    showList = current == NO_LIST,
+                    open = opened == task.id,
+                ) { opened = if (opened == task.id) null else task.id }
+            }
+            if (shown.any { it.done && it.list != DAILY_LIST }) {
+                item {
+                    Box(modifier = Modifier.offset(x = (-4).dp)) {
+                        SmallAction("Clear done") {
+                            val cleared = current
+                            SyncDocs.todo.edit { todo ->
+                                todo.discard { it.done && it.list != DAILY_LIST && (cleared == NO_LIST || it.list == cleared) }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        if (shown.any { it.done && it.list != DAILY_LIST }) {
-            TextButton(onClick = {
-                val cleared = current
-                SyncDocs.todo.edit { todo ->
-                    todo.discard { it.done && it.list != DAILY_LIST && (cleared == NO_LIST || it.list == cleared) }
-                }
-            }) { Text("Clear done") }
-        }
-
-        AddRow("New task") { text ->
+        AddField("New task", add = { text ->
             val id = SyncDocs.newId()
             val into = current
             SyncDocs.todo.edit { todo -> todo.copy(tasks = todo.tasks + Task(id, text, list = into)) }
-        }
+        }, modifier = Modifier.padding(bottom = 8.dp))
     }
 
     if (naming) {
@@ -269,36 +251,46 @@ private fun TodosPage(close: () -> Unit) {
 }
 
 @Composable
-private fun TaskRow(task: Task, lists: List<TaskList>, open: Boolean, toggleOpen: () -> Unit) {
+private fun TaskRow(task: Task, lists: List<TaskList>, showList: Boolean, open: Boolean, toggleOpen: () -> Unit) {
     fun update(change: (Task) -> Task) {
         SyncDocs.todo.edit { todo -> todo.copy(tasks = todo.tasks.map { if (it.id == task.id) change(it) else it }) }
     }
+    val listName = lists.firstOrNull { it.id == task.list }?.name
 
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable(onClick = toggleOpen)) {
-            Checkbox(checked = task.done, onCheckedChange = { done -> update { it.copy(done = done) } })
-            Column(modifier = Modifier.weight(1f)) {
+    ItemRow(open = open, onClick = toggleOpen, details = { if (open) TaskDetails(task, lists, ::update) }) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 52.dp)) {
+            Check(task.done, { done -> update { it.copy(done = done) } })
+            Column(modifier = Modifier.weight(1f).padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
                     task.text,
                     fontSize = 15.sp,
                     textDecoration = if (task.done) TextDecoration.LineThrough else null,
-                    color = if (task.done) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
+                    color = if (task.done) Theme.textDim else Theme.text,
                 )
-                if (!open && task.description.isNotEmpty()) Dim(task.description, maxLines = 1)
+                if (!open && task.description.isNotEmpty()) {
+                    Dim(task.description.trim(), maxLines = 2, color = if (task.done) Theme.textDim else Theme.value)
+                }
+                if (showList && listName != null) Dim(listName, maxLines = 1, size = 12.sp)
             }
-            TextButton(onClick = { update { it.copy(important = !it.important) } }) {
-                Text(if (task.important) "★" else "☆", fontSize = 18.sp)
-            }
+            IconTap(
+                if (task.important) R.drawable.ic_star_filled else R.drawable.ic_star,
+                if (task.important) "Unstar" else "Star",
+                { update { it.copy(important = !it.important) } },
+                iconSize = 18.dp,
+                tint = if (task.important) Theme.text else Theme.ring,
+            )
         }
-        if (open) TaskDetails(task, lists, ::update)
     }
 }
 
 @Composable
 private fun TaskDetails(task: Task, lists: List<TaskList>, update: ((Task) -> Task) -> Unit) {
-    var menu by remember { mutableStateOf(false) }
+    var picking by remember { mutableStateOf(false) }
     val external by SyncDocs.todo.external.collectAsState()
-    Column(modifier = Modifier.padding(start = 48.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(
+        modifier = Modifier.padding(start = 44.dp, end = 12.dp, bottom = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
         EditField(
             external = external,
             current = { SyncDocs.todo.doc.value.tasks.firstOrNull { it.id == task.id }?.description },
@@ -306,30 +298,32 @@ private fun TaskDetails(task: Task, lists: List<TaskList>, update: ((Task) -> Ta
             placeholder = "Details",
             modifier = Modifier.fillMaxWidth(),
         )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box {
-                TextButton(onClick = { menu = true }) { Text(lists.firstOrNull { it.id == task.list }?.name ?: "No list") }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("No list") }, onClick = {
-                        menu = false
-                        update { it.copy(list = NO_LIST) }
-                    })
-                    lists.forEach { list ->
-                        DropdownMenuItem(text = { Text(list.name) }, onClick = {
-                            menu = false
-                            update { it.copy(list = list.id) }
-                        })
-                    }
-                }
-            }
-            TextButton(onClick = { SyncDocs.todo.edit { todo -> todo.discard { it.id == task.id } } }) {
-                Text("Delete", color = MaterialTheme.colorScheme.error)
-            }
+        Row(modifier = Modifier.offset(x = (-12).dp), verticalAlignment = Alignment.CenterVertically) {
+            SmallAction(lists.firstOrNull { it.id == task.list }?.name ?: "No list") { picking = true }
+            SmallAction("Delete", danger = true) { SyncDocs.todo.edit { todo -> todo.discard { it.id == task.id } } }
         }
+    }
+    if (picking) {
+        PickDialog(
+            title = "Move to",
+            options = listOf(NO_LIST) + lists.map { it.id },
+            selected = task.list,
+            name = { id -> if (id == NO_LIST) "No list" else lists.firstOrNull { it.id == id }?.name ?: "" },
+            pick = { id -> update { it.copy(list = id) } },
+            dismiss = { picking = false },
+        )
     }
 }
 
 // Notes
+
+private val DayFormat = DateTimeFormatter.ofPattern("MMM d", Locale.ENGLISH)
+
+private fun shortDate(millis: Long): String {
+    if (millis <= 0) return ""
+    val day = Instant.ofEpochMilli(millis).atZone(ZoneId.systemDefault()).toLocalDate()
+    return if (day == LocalDate.now()) "Today" else DayFormat.format(day)
+}
 
 @Composable
 private fun NotesPage(close: () -> Unit) {
@@ -342,31 +336,52 @@ private fun NotesPage(close: () -> Unit) {
         return
     }
 
-    PageColumn {
-        PageHeader("Notes", if (notes.isEmpty()) "" else "${notes.size} ${if (notes.size == 1) "note" else "notes"}", close)
+    ScreenColumn(scroll = false, spacing = 8.dp) {
+        ScreenHeader(
+            "Notes",
+            if (notes.isEmpty()) null else "${notes.size} ${if (notes.size == 1) "note" else "notes"}",
+            back = close,
+        ) {
+            IconTap(R.drawable.ic_plus, "New note", {
+                val id = SyncDocs.newId()
+                val now = System.currentTimeMillis()
+                SyncDocs.notes.edit { list -> listOf(Note(id, "", "", now, now)) + list }
+                opened = id
+            })
+        }
         LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (notes.isEmpty()) item { Empty("No notes yet") }
             items(notes, key = { it.id }) { item ->
-                Column(modifier = Modifier.fillMaxWidth().clickable { opened = item.id }.padding(vertical = 10.dp)) {
-                    Text(item.title.ifEmpty { "Untitled" }, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Dim(
-                        if (item.isPrivate == true) "Private" else item.body.replace(Regex("\\s+"), " ").trim().ifEmpty { "No text" },
-                        maxLines = 1,
-                    )
+                ItemRow(onClick = { opened = item.id }) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                            Text(
+                                item.title.ifEmpty { "Untitled" },
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Theme.text,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Dim(
+                                if (item.isPrivate == true) "Private" else item.body.replace(Regex("\\s+"), " ").trim().ifEmpty { "No text" },
+                                maxLines = 2,
+                            )
+                        }
+                        Dim(shortDate(item.updated), size = 12.sp)
+                    }
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             }
         }
-        OutlinedButton(modifier = Modifier.fillMaxWidth(), onClick = {
-            val id = SyncDocs.newId()
-            val now = System.currentTimeMillis()
-            SyncDocs.notes.edit { list -> listOf(Note(id, "", "", now, now)) + list }
-            opened = id
-        }) { Text("New note") }
     }
 }
 
 @Composable
 private fun NoteEditor(note: Note, back: () -> Unit) {
+    BackHandler(onBack = back)
     val external by SyncDocs.notes.external.collectAsState()
     var title by remember(note.id) { mutableStateOf(note.title) }
     var body by remember(note.id) { mutableStateOf(note.body) }
@@ -394,45 +409,51 @@ private fun NoteEditor(note: Note, back: () -> Unit) {
 
     val covered = note.isPrivate == true && !revealed
 
-    PageColumn {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            TextButton(onClick = back) { Text("Back") }
-            Box(modifier = Modifier.weight(1f))
-            TextButton(onClick = {
+    ScreenColumn(scroll = false, spacing = 4.dp) {
+        ScreenHeader("Note", shortDate(note.updated).let { if (it.isEmpty()) null else "Edited $it" }, back = back) {
+            Chip("Private", note.isPrivate == true) {
                 val value = note.isPrivate != true
                 // Not an edit: it keeps its place and date
                 SyncDocs.notes.edit { list -> list.map { if (it.id == note.id) it.copy(isPrivate = value) else it } }
-            }) { Text(if (note.isPrivate == true) "Private" else "Make private") }
-            TextButton(onClick = { deleting = true }) { Text("Delete", color = MaterialTheme.colorScheme.error) }
+            }
+            IconTap(R.drawable.ic_trash, "Delete", { deleting = true }, iconSize = 18.dp, tint = Theme.danger)
         }
 
         if (covered) {
             Column(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
+                verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
             ) {
-                Text("This note is private", fontSize = 15.sp)
-                TextButton(onClick = { revealed = true }) { Text("Show") }
+                Glyph(R.drawable.ic_lock, size = 28.dp, tint = Theme.textDim)
+                Text("This note is private", fontSize = 15.sp, color = Theme.text)
+                LisButton("Show", { revealed = true })
             }
         } else {
-            OutlinedTextField(
+            Field(
                 value = title,
-                onValueChange = {
+                onChange = {
                     title = it
                     save()
                 },
-                singleLine = true,
-                placeholder = { Text("Title") },
+                placeholder = "Title",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.SemiBold,
+                plain = true,
+                padding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
-            OutlinedTextField(
+            Field(
                 value = body,
-                onValueChange = {
+                onChange = {
                     body = it
                     save()
                 },
-                placeholder = { Text("Write here") },
+                placeholder = "Write here",
+                singleLine = false,
+                fill = true,
+                plain = true,
+                padding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
                 modifier = Modifier.weight(1f).fillMaxWidth(),
             )
         }
@@ -456,22 +477,20 @@ private fun GoalsPage(close: () -> Unit) {
     val sorted = goals.filterNot { it.done } + goals.filter { it.done }
     val done = goals.count { it.done }
 
-    PageColumn {
-        PageHeader("Goals", if (goals.isEmpty()) "" else "$done of ${goals.size} done", close)
-        Column(
-            modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            sorted.forEach { goal ->
+    ScreenColumn(scroll = false, spacing = 8.dp) {
+        ScreenHeader("Goals", if (goals.isEmpty()) null else "$done of ${goals.size} done", back = close)
+        LazyColumn(modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            if (goals.isEmpty()) item { Empty("No goals yet") }
+            items(sorted, key = { it.id }) { goal ->
                 GoalRow(goal, opened == goal.id) { opened = if (opened == goal.id) null else goal.id }
             }
         }
-        AddRow("New goal") { title ->
+        AddField("New goal", add = { title ->
             val id = SyncDocs.newId()
             val now = System.currentTimeMillis()
             SyncDocs.goals.edit { list -> list + Goal(id, title, created = now) }
             opened = id
-        }
+        }, modifier = Modifier.padding(bottom = 8.dp))
     }
 }
 
@@ -485,33 +504,58 @@ private fun GoalRow(goal: Goal, open: Boolean, toggleOpen: () -> Unit) {
     val external by SyncDocs.goals.external.collectAsState()
     val finished = goal.subgoals.count { it.done }
 
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().clickable(onClick = toggleOpen)) {
-            Checkbox(checked = goal.done, onCheckedChange = { done -> editGoal(goal.id) { it.copy(done = done) } })
-            Text(
-                goal.title,
-                fontSize = 15.sp,
-                textDecoration = if (goal.done) TextDecoration.LineThrough else null,
-                modifier = Modifier.weight(1f),
-            )
-            if (goal.subgoals.isNotEmpty()) Dim("$finished/${goal.subgoals.size}")
-        }
-        if (open) {
-            Column(modifier = Modifier.padding(start = 48.dp, bottom = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                EditField(
-                    external = external,
-                    current = { SyncDocs.goals.doc.value.firstOrNull { it.id == goal.id }?.title },
-                    onChange = { text -> editGoal(goal.id) { it.copy(title = text) } },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                goal.subgoals.forEach { subgoal -> SubgoalRow(goal.id, subgoal) }
-                AddRow("New step") { title ->
-                    val id = SyncDocs.newId()
-                    editGoal(goal.id) { it.copy(subgoals = it.subgoals + Subgoal(id, title)) }
+    ItemRow(
+        open = open,
+        onClick = toggleOpen,
+        details = {
+            if (open) {
+                Column(
+                    modifier = Modifier.padding(start = 44.dp, end = 12.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    EditField(
+                        external = external,
+                        current = { SyncDocs.goals.doc.value.firstOrNull { it.id == goal.id }?.title },
+                        onChange = { text -> editGoal(goal.id) { it.copy(title = text.replace(Regex("[\\r\\n]+"), " ")) } },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    goal.subgoals.forEach { subgoal -> SubgoalRow(goal.id, subgoal) }
+                    Spacer(Modifier.height(4.dp))
+                    AddField("New step", add = { title ->
+                        val id = SyncDocs.newId()
+                        editGoal(goal.id) { it.copy(subgoals = it.subgoals + Subgoal(id, title)) }
+                    })
+                    Box(modifier = Modifier.offset(x = (-12).dp)) {
+                        SmallAction("Delete goal", danger = true) { deleting = true }
+                    }
                 }
-                TextButton(onClick = { deleting = true }) { Text("Delete goal", color = MaterialTheme.colorScheme.error) }
             }
+        },
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.heightIn(min = 52.dp)) {
+            Check(goal.done, { done -> editGoal(goal.id) { it.copy(done = done) } })
+            Column(modifier = Modifier.weight(1f).padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    goal.title,
+                    fontSize = 15.sp,
+                    textDecoration = if (goal.done) TextDecoration.LineThrough else null,
+                    color = if (goal.done) Theme.textDim else Theme.text,
+                )
+                if (goal.subgoals.isNotEmpty()) {
+                    Box(Modifier.fillMaxWidth(0.6f).height(2.dp).clip(CircleShape).background(Theme.track)) {
+                        Box(
+                            Modifier
+                                .fillMaxWidth(finished.toFloat() / goal.subgoals.size)
+                                .fillMaxHeight()
+                                .clip(CircleShape)
+                                .background(if (goal.done) Theme.textDim else Theme.fill),
+                        )
+                    }
+                }
+            }
+            if (goal.subgoals.isNotEmpty()) Dim("$finished/${goal.subgoals.size}", modifier = Modifier.padding(horizontal = 14.dp))
         }
     }
 
@@ -526,18 +570,234 @@ private fun GoalRow(goal: Goal, open: Boolean, toggleOpen: () -> Unit) {
 private fun SubgoalRow(goalId: Long, subgoal: Subgoal) {
     fun update(change: (Goal) -> Goal) = editGoal(goalId, change)
 
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Checkbox(checked = subgoal.done, onCheckedChange = { done ->
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().offset(x = (-12).dp)) {
+        Check(subgoal.done, { done ->
             update { goal -> goal.copy(subgoals = goal.subgoals.map { if (it.id == subgoal.id) it.copy(done = done) else it }) }
-        })
+        }, size = 16.dp)
         Text(
             subgoal.title,
             fontSize = 14.sp,
             textDecoration = if (subgoal.done) TextDecoration.LineThrough else null,
+            color = if (subgoal.done) Theme.textDim else Theme.text,
             modifier = Modifier.weight(1f),
         )
-        TextButton(onClick = {
+        IconTap(R.drawable.ic_close, "Remove", {
             update { goal -> goal.copy(subgoals = goal.subgoals.filterNot { it.id == subgoal.id }) }
-        }) { Text("Remove", fontSize = 12.sp) }
+        }, size = 36.dp, iconSize = 14.dp, tint = Theme.faint)
+    }
+}
+
+// Calendar
+
+private val MonthFormat = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.ENGLISH)
+private val LongDayFormat = DateTimeFormatter.ofPattern("EEEE, MMMM d", Locale.ENGLISH)
+private val UpcomingFormat = DateTimeFormatter.ofPattern("EEE, MMM d", Locale.ENGLISH)
+private const val UPCOMING_DAYS = 30L
+private const val SWIPE_PX = 120f
+
+@Composable
+private fun CalendarPage(close: () -> Unit) {
+    val notes by SyncDocs.calendar.doc.collectAsState()
+    val settings by Prefs.settings.collectAsState()
+    val today = LocalDate.now()
+    var month by remember { mutableStateOf(YearMonth.from(today)) }
+    var selected by remember { mutableStateOf(today) }
+    var yearly by remember { mutableStateOf(false) }
+
+    val firstDay = if (settings.weekStartsMonday) DayOfWeek.MONDAY else DayOfWeek.SUNDAY
+    val start = month.atDay(1).let { first ->
+        first.minusDays(((first.dayOfWeek.value - firstDay.value + 7) % 7).toLong())
+    }
+    val cells = (0 until 42).map { start.plusDays(it.toLong()) }
+    val dayNotes = notes.filter { it.fallsOn(selected) }
+    val upcoming = (1..UPCOMING_DAYS).flatMap { offset ->
+        val day = today.plusDays(offset)
+        notes.filter { it.fallsOn(day) }.map { day to it }
+    }.take(6)
+
+    fun select(day: LocalDate) {
+        selected = day
+        month = YearMonth.from(day)
+    }
+
+    ScreenColumn(spacing = 8.dp) {
+        ScreenHeader("Calendar", if (notes.isEmpty()) null else "${notes.size} ${if (notes.size == 1) "note" else "notes"}", back = close)
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconTap(R.drawable.ic_back, "Previous month", { month = month.minusMonths(1) }, tint = Theme.faint)
+            Text(
+                MonthFormat.format(month),
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium,
+                color = Theme.text,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.weight(1f),
+            )
+            if (month != YearMonth.from(today) || selected != today) {
+                LisButton("Today", { select(today) })
+            }
+            IconTap(R.drawable.ic_forward, "Next month", { month = month.plusMonths(1) }, tint = Theme.faint)
+        }
+
+        Column(
+            modifier = Modifier.pointerInput(Unit) {
+                var travel = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { travel = 0f },
+                    onDragEnd = {
+                        if (travel > SWIPE_PX) month = month.minusMonths(1)
+                        if (travel < -SWIPE_PX) month = month.plusMonths(1)
+                    },
+                    onHorizontalDrag = { _, amount -> travel += amount },
+                )
+            },
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                (0 until 7).forEach { index ->
+                    Text(
+                        firstDay.plus(index.toLong()).getDisplayName(java.time.format.TextStyle.SHORT, Locale.ENGLISH),
+                        fontSize = 12.sp,
+                        color = Theme.textDim,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+            cells.chunked(7).forEach { week ->
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    week.forEach { day ->
+                        DayCell(
+                            day = day,
+                            inMonth = YearMonth.from(day) == month,
+                            today = day == today,
+                            selected = day == selected,
+                            marked = notes.any { it.fallsOn(day) },
+                            modifier = Modifier.weight(1f),
+                        ) { select(day) }
+                    }
+                }
+            }
+        }
+
+        SectionHeader(LongDayFormat.format(selected), start = 4.dp, top = 12.dp)
+        if (dayNotes.isEmpty()) {
+            StatusLine("No notes for this day")
+        }
+        dayNotes.forEach { note -> CalendarNoteRow(note) }
+
+        AddField("Add a note…", add = { text ->
+            val id = SyncDocs.newId()
+            val note = CalendarNote(id, selected.toString(), text, yearly)
+            SyncDocs.calendar.edit { list -> list + note }
+            yearly = false
+        }) {
+            Chip("Yearly", yearly) { yearly = !yearly }
+        }
+
+        if (upcoming.isNotEmpty()) {
+            SectionHeader("Coming up", start = 4.dp, top = 16.dp)
+            upcoming.forEach { (day, note) ->
+                ItemRow(onClick = { select(day) }) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Text(UpcomingFormat.format(day), fontSize = 13.sp, color = Theme.textDim, modifier = Modifier.width(96.dp))
+                        Text(note.text, fontSize = 14.sp, color = Theme.text, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+}
+
+/** As in the shell: today in the text color, the chosen day a step lighter, a dot under days with notes. */
+@Composable
+private fun DayCell(
+    day: LocalDate,
+    inMonth: Boolean,
+    today: Boolean,
+    selected: Boolean,
+    marked: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    Box(
+        modifier = modifier
+            .height(46.dp)
+            .clip(RowShape)
+            .background(
+                when {
+                    today -> Theme.text
+                    selected -> Theme.border
+                    pressed -> Theme.hover
+                    else -> Color.Transparent
+                },
+            )
+            .clickable(interactionSource = source, indication = null, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "${day.dayOfMonth}",
+            fontSize = 14.sp,
+            fontWeight = if (today) FontWeight.SemiBold else FontWeight.Normal,
+            color = when {
+                today -> Theme.panel
+                inMonth -> Theme.text
+                else -> Theme.ring
+            },
+        )
+        if (marked) {
+            Box(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 6.dp)
+                    .size(4.dp)
+                    .clip(CircleShape)
+                    .background(
+                        when {
+                            today -> Theme.panel
+                            inMonth -> Theme.faint
+                            else -> Theme.ring
+                        },
+                    ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun CalendarNoteRow(note: CalendarNote) {
+    var editing by remember { mutableStateOf(false) }
+    Row(
+        modifier = Modifier.fillMaxWidth().clip(RowShape).background(Theme.hover).padding(start = 14.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(Modifier.size(6.dp).clip(CircleShape).background(Theme.faint))
+        Text(
+            note.text,
+            fontSize = 15.sp,
+            color = Theme.text,
+            modifier = Modifier
+                .weight(1f)
+                .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) { editing = true }
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+        )
+        Chip("Yearly", note.yearly) {
+            SyncDocs.calendar.edit { list -> list.map { if (it.id == note.id) it.copy(yearly = !it.yearly) else it } }
+        }
+        IconTap(R.drawable.ic_close, "Remove", {
+            SyncDocs.calendar.edit { list -> list.filterNot { it.id == note.id } }
+        }, size = 40.dp, iconSize = 14.dp, tint = Theme.faint)
+    }
+    if (editing) {
+        NameDialog("Edit note", note.text, save = { text ->
+            val clean = text.replace(Regex("[\\r\\n]+"), " ")
+            SyncDocs.calendar.edit { list -> list.map { if (it.id == note.id) it.copy(text = clean) else it } }
+        }, dismiss = { editing = false })
     }
 }

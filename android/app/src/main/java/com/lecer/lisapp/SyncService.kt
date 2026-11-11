@@ -1,8 +1,10 @@
 package com.lecer.lisapp
 
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
@@ -15,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -33,12 +36,30 @@ class SyncService : Service() {
         }
     }
 
+    /** The PC hears about the charger at once, rather than at the next round of figures. */
+    private val chargingReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (!Prefs.current.reportCharging) return
+            // The battery's own status can take a moment to follow
+            scope.launch {
+                StatsReporter.sendNow(this@SyncService)
+                delay(CHARGE_SETTLES_MS)
+                StatsReporter.sendNow(this@SyncService)
+            }
+        }
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         discovery = Discovery(this) { found -> onFound(found) }
         getSystemService<ConnectivityManager>()?.registerDefaultNetworkCallback(networkCallback)
+        val power = IntentFilter().apply {
+            addAction(Intent.ACTION_POWER_CONNECTED)
+            addAction(Intent.ACTION_POWER_DISCONNECTED)
+        }
+        ContextCompat.registerReceiver(this, chargingReceiver, power, ContextCompat.RECEIVER_NOT_EXPORTED)
 
         scope.launch {
             Lis.state.map { it.connection to it.pcName }.distinctUntilChanged().collect { (connection, name) ->
@@ -47,15 +68,17 @@ class SyncService : Service() {
             }
         }
         scope.launch {
-            while (true) {
-                delay(STATS_EVERY_MS)
-                StatsReporter.sendNow(this@SyncService)
+            Prefs.settings.map { it.statsSeconds }.distinctUntilChanged().collectLatest { seconds ->
+                while (true) {
+                    delay(seconds * 1000L)
+                    StatsReporter.sendNow(this@SyncService)
+                }
             }
         }
         // Nothing announces a cable being plugged in, and backing off would make it slow to notice
         scope.launch {
             while (true) {
-                delay(USB_RETRY_MS)
+                delay(Prefs.current.usbRetrySeconds * 1000L)
                 val state = Lis.state.value
                 if (state.usbMode && state.connection != ConnectionState.CONNECTED) Lis.client.reconnectNow()
             }
@@ -93,14 +116,14 @@ class SyncService : Service() {
     override fun onDestroy() {
         scope.cancel()
         discovery.stop()
+        unregisterReceiver(chargingReceiver)
         getSystemService<ConnectivityManager>()?.unregisterNetworkCallback(networkCallback)
         super.onDestroy()
     }
 
     companion object {
         private const val TAG = "LisSync"
-        private const val STATS_EVERY_MS = 60_000L
-        private const val USB_RETRY_MS = 5_000L
+        private const val CHARGE_SETTLES_MS = 3_000L
 
         fun start(context: Context) {
             try {

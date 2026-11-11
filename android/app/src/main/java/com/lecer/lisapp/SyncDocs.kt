@@ -1,6 +1,7 @@
 package com.lecer.lisapp
 
 import android.util.Log
+import java.time.LocalDate
 import java.util.Calendar
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
@@ -169,6 +170,41 @@ data class Note(
     }
 }
 
+/** A note on a day of the shell's calendar. A yearly one shows on that day every year. */
+data class CalendarNote(
+    val id: Long,
+    val date: String,
+    val text: String,
+    val yearly: Boolean = false,
+    val raw: String = "{}",
+) {
+    fun toJson(): JSONObject = JSONObject(raw)
+        .put("id", id)
+        .put("date", date)
+        .put("text", text)
+        .put("yearly", yearly)
+
+    /** As the shell matches them: a yearly Feb 29 shows on Feb 28 in other years. */
+    fun fallsOn(day: LocalDate): Boolean {
+        val key = day.toString()
+        if (date == key) return true
+        if (!yearly) return false
+        val monthDay = date.drop(5)
+        if (monthDay == key.drop(5)) return true
+        return monthDay == "02-29" && key.drop(5) == "02-28" && !day.isLeapYear
+    }
+
+    companion object {
+        fun from(json: JSONObject) = CalendarNote(
+            id = json.optLong("id"),
+            date = json.optString("date"),
+            text = json.optString("text"),
+            yearly = json.optBoolean("yearly"),
+            raw = json.toString(),
+        )
+    }
+}
+
 private fun parseList(text: String): List<JSONObject> = objects(JSONArray(text))
 
 /** One document on this phone. Edits show at once, and are saved after a pause in the typing. */
@@ -262,6 +298,12 @@ object SyncDocs {
         parse = { text -> parseList(text).map { Note.from(it) }.distinctBy { it.id } },
         write = { list -> JSONArray(list.map { it.toJson() }).toString() },
     )
+    val calendar = SyncedDoc(
+        kind = "calendar",
+        empty = emptyList<CalendarNote>(),
+        parse = { text -> parseList(text).map { CalendarNote.from(it) }.distinctBy { it.id } },
+        write = { list -> JSONArray(list.map { it.toJson() }).toString() },
+    )
 
     private var lastId = 0L
 
@@ -277,6 +319,7 @@ object SyncDocs {
             "todo" -> todo.reload()
             "goals" -> goals.reload()
             "notes" -> notes.reload()
+            "calendar" -> calendar.reload()
         }
     }
 
@@ -284,12 +327,14 @@ object SyncDocs {
         todo.reload()
         goals.reload()
         notes.reload()
+        calendar.reload()
     }
 
     fun flushAll() {
         todo.flush()
         goals.flush()
         notes.flush()
+        calendar.flush()
     }
 
     fun clear() = reloadAll()

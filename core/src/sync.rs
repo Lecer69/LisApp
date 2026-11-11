@@ -1,11 +1,11 @@
-//! Todos, notes and goals. These documents are the shell's own files, so they carry no edit times
+//! Todos, notes, goals and calendar notes. These documents are the shell's own files, so they carry no edit times
 //! or deletion marks: what changed is found by comparing each side to the last copy both agreed on.
 
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
-pub const KINDS: [&str; 3] = ["todo", "goals", "notes"];
+pub const KINDS: [&str; 4] = ["todo", "goals", "notes", "calendar"];
 /// Well under the protocol's limit on a message, which also holds the envelope.
 pub const MAX_DOC_LEN: usize = 900 * 1024;
 
@@ -14,6 +14,7 @@ pub fn file_name(kind: &str) -> Option<&'static str> {
         "todo" => Some("todo.json"),
         "goals" => Some("goals.json"),
         "notes" => Some("notes.json"),
+        "calendar" => Some("calendar.json"),
         _ => None,
     }
 }
@@ -56,6 +57,7 @@ pub fn check(kind: &str, doc: &Value) -> Result<(), String> {
                 && doc.as_array().is_some_and(|goals| goals.iter().all(|goal| has_items(&goal["subgoals"], &["title"])))
         }
         "notes" => has_items(doc, &["title", "body"]),
+        "calendar" => has_items(doc, &["date", "text"]),
         _ => return Err("Not something that syncs".to_string()),
     };
     if !valid {
@@ -410,6 +412,8 @@ mod tests {
         assert!(check("todo", &json!({ "tasks": [{ "text": "no id" }], "lists": [], "trash": [], "dailyDate": "" })).is_err());
         assert!(check("goals", &json!([{ "id": 1, "title": "no subgoals" }])).is_err());
         assert!(check("notes", &json!([{ "id": 1, "title": "no body" }])).is_err());
+        assert!(check("calendar", &json!([{ "id": 1, "text": "no date" }])).is_err());
+        assert_eq!(check("calendar", &json!([{ "id": 1, "date": "2026-11-11", "text": "a", "yearly": true }])), Ok(()));
         assert!(check("passwords", &json!([])).is_err());
     }
 

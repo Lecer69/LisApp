@@ -141,7 +141,7 @@ class UnlockActivity : Activity() {
         fun popUp(context: Context) {
             val state = Lis.state.value
             // Not over the camera's framing
-            if (current != null || state.camera.running || !Unlocker.hasKey()) return
+            if (current != null || state.camera.running || !Unlocker.hasKey() || !Prefs.current.unlockPopUp) return
             Notifications.showUnlockPrompt(context, state.paired?.name ?: "your PC")
             if (Settings.canDrawOverlays(context)) {
                 runCatching { context.startActivity(intent(context)) }.onFailure { Log.w(TAG, "can't start the prompt", it) }

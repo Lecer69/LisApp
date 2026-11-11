@@ -75,6 +75,7 @@ object Notifications {
     }
 
     fun showFile(context: Context, id: Int, text: String) {
+        if (!Prefs.current.notifyFiles) return
         val notification = Notification.Builder(context, FILES_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Lis App")
@@ -137,6 +138,7 @@ object Notifications {
     )
 
     fun showPcLocked(context: Context, pcName: String) {
+        if (!Prefs.current.notifyPcLocked) return
         val unlock = openPrompt(context, 1)
         val notification = Notification.Builder(context, LOCK_CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)

@@ -1,4 +1,4 @@
-//! The shell's todo, goals and notes files, which stay the only copy on this PC. The shell watches
+//! The shell's todo, goals, notes and calendar files, which stay the only copy on this PC. The shell watches
 //! them, and what comes from a phone replaces them atomically, the same way the shell saves.
 
 use lis_core::sync::{check, empty, file_name, rev, KINDS};

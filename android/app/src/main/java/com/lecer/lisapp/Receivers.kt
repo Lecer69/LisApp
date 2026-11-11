@@ -13,7 +13,8 @@ class StopRingReceiver : BroadcastReceiver() {
 
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED && Lis.client.pairedPc() != null) {
+        val wanted = Prefs.current.startOnBoot && Prefs.current.keepConnected
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED && wanted && Lis.client.pairedPc() != null) {
             SyncService.start(context)
         }
     }
