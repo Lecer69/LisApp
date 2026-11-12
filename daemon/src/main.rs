@@ -6,6 +6,7 @@ mod daemon;
 mod ipc;
 mod media;
 mod obs;
+mod snap;
 mod stats;
 mod sync;
 
@@ -41,6 +42,7 @@ fn paths() -> anyhow::Result<Paths> {
         socket: runtime.join("lis-app.sock"),
         camera_socket: runtime.join("lis-camera.sock"),
         downloads: home.join("Downloads"),
+        snaps: home.join("Pictures/Phone"),
         shell_data: home.join(".config/lis"),
     })
 }

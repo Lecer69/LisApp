@@ -2,15 +2,18 @@ package com.lecer.lisapp
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.ImageFormat
 import android.hardware.camera2.CameraAccessException
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CameraMetadata
+import android.hardware.camera2.CaptureFailure
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
+import android.media.ImageReader
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
@@ -65,6 +68,11 @@ class CameraStreamer(private val context: Context) {
     private var encoder: MediaCodec? = null
     private var encoderInput: Surface? = null
     private var orientationListener: OrientationEventListener? = null
+    /** Photos at the size picked as the session started, alongside the stream. Null when the camera can't. */
+    private var photoReader: ImageReader? = null
+    private var streamTargets: List<Surface> = emptyList()
+    private var frameRange: Range<Int>? = null
+    private var photoDone: ((ByteArray?) -> Unit)? = null
 
     private var config: VideoConfig? = null
     private var sensorOrientation = 0
@@ -95,6 +103,16 @@ class CameraStreamer(private val context: Context) {
     fun setAspect(wanted: CameraAspect) {
         aspect = wanted
         handler?.post(::sendRotation)
+    }
+
+    /**
+     * A JPEG of what the camera sees, as the phone is held, with no break in the stream. Answers on the
+     * camera's thread, with null if it couldn't. False when the camera isn't running.
+     */
+    fun snap(done: (ByteArray?) -> Unit): Boolean {
+        val cameraHandler = handler ?: return false
+        cameraHandler.post { capture(done, cameraHandler) }
+        return true
     }
 
     /** What this camera and an encoder can both do. */
@@ -142,6 +160,11 @@ class CameraStreamer(private val context: Context) {
     private fun release() {
         orientationListener?.disable()
         orientationListener = null
+        finishPhoto(null)
+        photoReader?.close()
+        photoReader = null
+        streamTargets = emptyList()
+        frameRange = null
         runCatching { session?.close() }
         session = null
         runCatching { device?.close() }
@@ -217,7 +240,7 @@ class CameraStreamer(private val context: Context) {
             cameras.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(opened: CameraDevice) {
                     device = opened
-                    startSession(opened, preview, input, range, cameraHandler)
+                    startSession(opened, preview, input, range, photoSizes(characteristics, size), cameraHandler)
                 }
 
                 override fun onDisconnected(closed: CameraDevice) {
@@ -275,11 +298,25 @@ class CameraStreamer(private val context: Context) {
         return input
     }
 
+    /** Largest first: the full sensor, then 4K or less, then the stream's own size, which a video snapshot is sure to get. */
+    private fun photoSizes(characteristics: CameraCharacteristics, stream: Size): List<Size> {
+        val map = characteristics[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP] ?: return emptyList()
+        val sizes = map.getOutputSizes(ImageFormat.JPEG).orEmpty().sortedByDescending { it.width.toLong() * it.height }
+        val within4k = sizes.firstOrNull { maxOf(it.width, it.height) <= MAX_SNAPSHOT_SIDE }
+        val streamSize = sizes.firstOrNull { it.width <= stream.width && it.height <= stream.height }
+        return listOfNotNull(sizes.firstOrNull(), within4k, streamSize).distinct()
+    }
+
+    /**
+     * With the first photo size the camera says it can run beside the stream. When it can't say, the stream's
+     * size is tried, and the stream goes on without photos if the camera turns that down.
+     */
     private fun startSession(
         opened: CameraDevice,
         preview: Surface,
         input: Surface,
         range: Range<Int>,
+        photos: List<Size>,
         cameraHandler: Handler,
     ) {
         try {
@@ -290,10 +327,15 @@ class CameraStreamer(private val context: Context) {
                 // Stabilizing delays frames, and can cap the frame rate
                 set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
             }.build()
-            val outputs = listOf(OutputConfiguration(preview), OutputConfiguration(input))
+
+            var reader: ImageReader? = null
             val callback = object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(configured: CameraCaptureSession) {
                     session = configured
+                    photoReader = reader
+                    streamTargets = listOf(preview, input)
+                    frameRange = range
+                    Lis.update { copy(camera = camera.copy(canSnap = reader != null)) }
                     try {
                         configured.setRepeatingRequest(request, null, cameraHandler)
                     } catch (error: CameraAccessException) {
@@ -304,18 +346,104 @@ class CameraStreamer(private val context: Context) {
                 }
 
                 override fun onConfigureFailed(configured: CameraCaptureSession) {
-                    fail("This camera can't run this resolution at ${range.upper} fps. Try less.")
+                    val tried = reader ?: return fail("This camera can't run this resolution at ${range.upper} fps. Try less.")
+                    Log.w(TAG, "the camera turned down photos at ${tried.width}x${tried.height}, streaming without them")
+                    tried.close()
+                    startSession(opened, preview, input, range, emptyList(), cameraHandler)
                 }
             }
-            val setup = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, { cameraHandler.post(it) }, callback)
-            // Many cameras choose their sensor mode here, from the frame rate, and not from later requests
-            setup.sessionParameters = request
-            opened.createCaptureSession(setup)
+
+            fun setupWith(photoReader: ImageReader?): SessionConfiguration {
+                val outputs = listOfNotNull(
+                    OutputConfiguration(preview),
+                    OutputConfiguration(input),
+                    photoReader?.let { OutputConfiguration(it.surface) },
+                )
+                return SessionConfiguration(SessionConfiguration.SESSION_REGULAR, outputs, { cameraHandler.post(it) }, callback).apply {
+                    // Many cameras choose their sensor mode here, from the frame rate, and not from later requests
+                    sessionParameters = request
+                }
+            }
+
+            for (photo in photos) {
+                val candidate = ImageReader.newInstance(photo.width, photo.height, ImageFormat.JPEG, PHOTO_BUFFERS)
+                val supported = try {
+                    opened.isSessionConfigurationSupported(setupWith(candidate))
+                } catch (error: UnsupportedOperationException) {
+                    null
+                } catch (error: CameraAccessException) {
+                    null
+                } catch (error: IllegalArgumentException) {
+                    false
+                }
+                Log.i(TAG, "photos at $photo beside the stream: ${supported ?: "can't tell"}")
+                if (supported == true || (supported == null && photo == photos.last())) {
+                    reader = candidate
+                    break
+                }
+                candidate.close()
+            }
+            reader?.setOnImageAvailableListener(::onPhoto, cameraHandler)
+            opened.createCaptureSession(setupWith(reader))
         } catch (error: CameraAccessException) {
             fail("Can't start the camera: ${error.message}")
         } catch (error: IllegalStateException) {
             Log.w(TAG, "the camera closed while starting", error)
         }
+    }
+
+    private fun capture(done: (ByteArray?) -> Unit, cameraHandler: Handler) {
+        val reader = photoReader
+        val opened = device
+        val current = session
+        val range = frameRange
+        if (reader == null || opened == null || current == null || range == null || photoDone != null) {
+            done(null)
+            return
+        }
+        try {
+            val request = opened.createCaptureRequest(CameraDevice.TEMPLATE_VIDEO_SNAPSHOT).apply {
+                // The stream's targets too, so it doesn't miss this frame
+                streamTargets.forEach(::addTarget)
+                addTarget(reader.surface)
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, range)
+                set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CameraMetadata.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
+                // Upright as the phone is held, whatever the stream's lock
+                set(CaptureRequest.JPEG_ORIENTATION, rotationFor(phoneDegrees))
+                set(CaptureRequest.JPEG_QUALITY, JPEG_QUALITY)
+            }.build()
+            photoDone = done
+            current.capture(request, object : CameraCaptureSession.CaptureCallback() {
+                override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
+                    Log.w(TAG, "the photo failed, reason ${failure.reason}")
+                    finishPhoto(null)
+                }
+            }, cameraHandler)
+            cameraHandler.postDelayed({ if (photoDone === done) finishPhoto(null) }, PHOTO_TIMEOUT_MS)
+        } catch (error: CameraAccessException) {
+            Log.w(TAG, "can't take a photo", error)
+            finishPhoto(null)
+        } catch (error: IllegalStateException) {
+            Log.w(TAG, "the camera closed before the photo", error)
+            finishPhoto(null)
+        }
+    }
+
+    private fun onPhoto(reader: ImageReader) {
+        val image = runCatching { reader.acquireNextImage() }.getOrNull() ?: return
+        val bytes = try {
+            val buffer = image.planes[0].buffer
+            ByteArray(buffer.remaining()).also { buffer.get(it) }
+        } finally {
+            image.close()
+        }
+        finishPhoto(bytes)
+    }
+
+    private fun finishPhoto(bytes: ByteArray?) {
+        val done = photoDone ?: return
+        photoDone = null
+        done(bytes)
     }
 
     private val encoderCallback = object : MediaCodec.Callback() {
@@ -442,5 +570,9 @@ class CameraStreamer(private val context: Context) {
         const val HALF_TURN = 180
         const val FULL_TURN = 360
         const val STOP_WAIT_SECONDS = 2L
+        const val MAX_SNAPSHOT_SIDE = 3840
+        const val PHOTO_BUFFERS = 2
+        const val PHOTO_TIMEOUT_MS = 5000L
+        const val JPEG_QUALITY: Byte = 95
     }
 }

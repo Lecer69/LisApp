@@ -108,7 +108,7 @@ impl Phone {
         let mut source = tempfile::NamedTempFile::new().unwrap();
         source.write_all(contents).unwrap();
         let file = std::fs::File::open(source.path()).unwrap();
-        self.handle.send(Command::SendFile { file, name: name.to_string(), size: contents.len() as u64 }).await;
+        self.handle.send(Command::SendFile { file, name: name.to_string(), size: contents.len() as u64, snap: false }).await;
         source
     }
 

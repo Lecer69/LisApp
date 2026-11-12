@@ -3,8 +3,8 @@
 Connects an Android phone to a lis desktop over the local network or a USB cable: phone stats and
 battery alerts on the PC, files both ways, locking and unlocking the PC from the phone, finding the
 phone, the shell's todos, notes, goals and calendar on the phone, the PC's media on the phone's lock screen,
-action buttons, and the phone's camera as an OBS source. It replaces KDE Connect and DroidCam for
-these.
+action buttons, and the phone's camera as an OBS source, with photos from it straight to the PC. It
+replaces KDE Connect and DroidCam for these.
 
 ## Layout
 
@@ -185,6 +185,19 @@ It uses its own encrypted connection on the same port, and only a paired phone c
 the connection can't keep up, the bitrate drops until it can, climbing back once it's been clear for a
 while. If frames still pile up, they're dropped until the next keyframe rather than the delay growing.
 
+## Snap to PC
+
+**Snap to PC** on the Camera screen takes a photo while the camera runs, with no break in the stream.
+**Take Photo** in the shell's Phone panel asks for one from the PC. It lands in `~/Pictures/Phone`, and
+on the PC's clipboard as a PNG, ready to paste. A notification shows it: click it to open the photo, or
+press **Show in Folder**. In the shell, Settings, Phone Sync, Snap to PC picks another folder and turns
+the copying off.
+
+The photo is upright the way the phone is held, whatever the stream's lock. It's the largest size the
+camera allows next to the stream, the full sensor on most phones; `adb logcat -s LisCamera` shows which.
+A camera that can't take photos while streaming still streams, and the button stays off. Copying needs
+`wl-copy`, from wl-clipboard.
+
 ## Test
 
 ```sh
@@ -193,7 +206,8 @@ cargo test
 
 The tests run real TLS on localhost and the real daemon binary, with the tools it runs, like
 `hyprctl`, `notify-send` and `playerctl`, stubbed. `cargo run -p lis-daemon --example fake_phone` stands in for the phone while working on
-the PC side, and can loop a video file as the camera; its header has the command that makes one.
+the PC side. It can loop a video file as the camera, and answer Take Photo with a JPEG; its header has
+the command that makes the video.
 
 `cargo test -p lis-camera` tests the plugin by loading it through libobs, with no OBS window or
 settings. `cargo run -p lis-camera --example watch` decodes the stream without OBS and reports the

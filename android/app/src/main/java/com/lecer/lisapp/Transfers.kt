@@ -3,15 +3,47 @@ package com.lecer.lisapp
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.util.Log
+import java.io.File
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 import java.util.concurrent.ConcurrentHashMap
 
 /** Files both ways. Rust reads and writes them through descriptors handed over from here. */
 object Transfers {
     private const val TAG = "LisFiles"
     private val incoming = ConcurrentHashMap<ULong, Uri>()
+    /** Photos on their way, by name, which two taken in the same second can share. */
+    private val snaps = mutableListOf<String>()
+    private val SNAP_NAME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH-mm-ss")
+
+    /** From a file in the cache that's gone at once, as the descriptor keeps it readable until it's sent. */
+    fun sendSnap(context: Context, photo: ByteArray) {
+        val name = "Snap ${LocalDateTime.now().format(SNAP_NAME)}.jpg"
+        try {
+            val file = File.createTempFile("snap", ".jpg", context.cacheDir)
+            val descriptor = try {
+                file.writeBytes(photo)
+                ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            } finally {
+                file.delete()
+            }
+            synchronized(snaps) { snaps.add(name) }
+            Lis.client.sendSnap(descriptor.detachFd(), name, photo.size.toULong())
+            snapNote(SnapNote("Sending the photo…", done = false))
+        } catch (error: Exception) {
+            synchronized(snaps) { snaps.remove(name) }
+            Log.w(TAG, "can't send a photo", error)
+            snapNote(SnapNote("Couldn't send the photo: ${error.message}", failed = true))
+        }
+    }
+
+    private fun snapNote(note: SnapNote) {
+        Lis.update { copy(camera = camera.copy(snap = note)) }
+    }
 
     fun send(context: Context, uri: Uri) {
         try {
@@ -62,6 +94,10 @@ object Transfers {
     }
 
     fun finish(context: Context, id: ULong, name: String, isIncoming: Boolean, ok: Boolean) {
+        if (!isIncoming && synchronized(snaps) { snaps.remove(name) }) {
+            snapNote(if (ok) SnapNote("Sent to the PC") else SnapNote("Couldn't send the photo", failed = true))
+            return
+        }
         if (isIncoming) {
             incoming.remove(id)?.let { uri ->
                 try {

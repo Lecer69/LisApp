@@ -116,6 +116,15 @@ async fn run(request: &Value, daemon: &Daemon) -> Result<Value, String> {
             daemon.ring_phone(fingerprint, request.get("ring").and_then(Value::as_bool).unwrap_or(true))?;
             Ok(Value::Null)
         }
+        "snap" => {
+            daemon.request_snap()?;
+            Ok(Value::Null)
+        }
+        "snap_settings" => {
+            let clipboard = request.get("clipboard").and_then(Value::as_bool).ok_or("No answer")?;
+            daemon.set_snap_settings(text("folder").unwrap_or(""), clipboard)?;
+            Ok(Value::Null)
+        }
         "usb_mode" => {
             daemon.set_usb(request.get("enabled").and_then(Value::as_bool).ok_or("No answer")?).await;
             Ok(Value::Null)

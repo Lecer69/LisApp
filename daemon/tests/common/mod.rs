@@ -27,12 +27,13 @@ impl Pc {
         for dir in ["bin", "run"] {
             std::fs::create_dir(home.path().join(dir)).unwrap();
         }
-        for tool in ["hyprctl", "notify-send", "playerctl", "wpctl", "adb", "curl"] {
+        for tool in ["hyprctl", "notify-send", "playerctl", "wpctl", "adb", "curl", "wl-copy", "xdg-open"] {
             let path = home.path().join("bin").join(tool);
             let base = home.path().join(tool);
             let base = base.display();
             let script = format!(
                 "#!/bin/sh\nline=''\nfor a in \"$@\"; do line=\"$line[$a] \"; done\nprintf '%s\\n' \"$line\" >> '{base}.log'\n\
+                 [ '{tool}' = wl-copy ] && /bin/cat > '{base}.in'\n\
                  [ -f '{base}.out' ] && /bin/cat '{base}.out'\n\
                  [ -f '{base}.exit' ] && exit \"$(/bin/cat '{base}.exit')\"\n\
                  exit 0\n",

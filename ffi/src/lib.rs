@@ -188,6 +188,8 @@ pub trait ClientListener: Send + Sync {
     /// Sign `unlock_message` of this, then answer with `unlock_respond`.
     fn on_unlock_challenge(&self, nonce: String);
     fn on_unlock_result(&self, ok: bool, reason: String);
+    /// The PC asks for a photo, which only the running camera can take.
+    fn on_snap_request(&self);
 }
 
 struct VideoLink {
@@ -585,6 +587,7 @@ impl Inner {
             Message::UnlockPrompt => self.listener.on_unlock_prompt(),
             Message::UnlockChallenge { nonce } => self.listener.on_unlock_challenge(nonce),
             Message::UnlockResult { ok, reason } => self.listener.on_unlock_result(ok, reason),
+            Message::SnapRequest => self.listener.on_snap_request(),
             _ => {}
         }
     }
@@ -860,18 +863,27 @@ impl LisClient {
 
     /// Takes ownership of `fd`, which must be readable.
     pub fn send_file(&self, fd: i32, name: String, size: u64) -> Result<(), LisError> {
+        self.send_fd(fd, name, size, false)
+    }
+
+    /// A photo from the Camera screen, which the PC also puts on its clipboard. Takes ownership of `fd`.
+    pub fn send_snap(&self, fd: i32, name: String, size: u64) -> Result<(), LisError> {
+        self.send_fd(fd, name, size, true)
+    }
+}
+
+impl LisClient {
+    fn send_fd(&self, fd: i32, name: String, size: u64, snap: bool) -> Result<(), LisError> {
         if fd < 0 {
             return Err(failed("Can't read that file"));
         }
         let file = unsafe { File::from_raw_fd(fd) };
         let size = if size > 0 { size } else { file.metadata().map_err(failed)?.len() };
         let handle = self.handle().ok_or_else(|| failed("Not connected to the PC"))?;
-        self.runtime.spawn(async move { handle.send(Command::SendFile { file, name, size }).await });
+        self.runtime.spawn(async move { handle.send(Command::SendFile { file, name, size, snap }).await });
         Ok(())
     }
-}
 
-impl LisClient {
     fn handle(&self) -> Option<Handle> {
         self.inner.state.lock().unwrap().handle.clone()
     }

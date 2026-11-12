@@ -113,6 +113,12 @@ impl Camera {
         let _ = self.items.send(Item::End);
     }
 
+    /// The phone that's streaming, if one is.
+    pub fn live_phone(&self) -> Option<String> {
+        let live = self.live.lock().unwrap();
+        live.info.as_ref().map(|_| live.fingerprint.clone())
+    }
+
     /// When a phone is unpaired: trust was only checked as its stream connected.
     pub fn drop_phone(&self, fingerprint: &str) {
         if self.live.lock().unwrap().fingerprint == fingerprint {

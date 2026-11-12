@@ -53,6 +53,9 @@ object Lis {
     /** So a camera the PC turned away stops encoding, on the screen that owns it. */
     var onCameraRefused: (() -> Unit)? = null
 
+    /** Take Photo in the shell, for the screen that holds the camera. */
+    var onSnapRequest: (() -> Unit)? = null
+
     /** The PC's challenge reaches the screen that asked for it, which holds the fingerprint prompt. */
     var onUnlockChallenge: ((String) -> Unit)? = null
 
@@ -234,6 +237,10 @@ object Lis {
         override fun onUnlockResult(ok: Boolean, reason: String) {
             update { copy(unlockMessage = if (ok) "Unlocked" else reason) }
             onUnlockOver?.invoke(if (ok) null else reason)
+        }
+
+        override fun onSnapRequest() {
+            onSnapRequest?.invoke()
         }
     }
 }

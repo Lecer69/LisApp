@@ -113,6 +113,7 @@ class MainActivity : ComponentActivity() {
                 Prefs.update { copy(cameraAspect = wanted) }
                 camera.setAspect(wanted)
             },
+            snap = ::snap,
             sizes = camera::sizes,
             surface = ::onPreviewSurface,
         )
@@ -233,6 +234,7 @@ class MainActivity : ComponentActivity() {
     @SuppressLint("SourceLockedOrientationActivity")
     private fun openCamera() {
         Lis.onCameraRefused = { runOnUiThread(::stopCamera) }
+        Lis.onSnapRequest = { runOnUiThread(::snap) }
         val front = Prefs.current.cameraFront
         Lis.update { copy(camera = camera.copy(error = null, front = if (camera.running) camera.front else front)) }
         camera.setAspect(Prefs.current.cameraAspect)
@@ -269,6 +271,20 @@ class MainActivity : ComponentActivity() {
     private fun stopCamera() {
         camera.stop()
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private fun snap() {
+        val status = Lis.state.value.camera
+        if (!status.running || !status.canSnap || status.snap?.done == false) return
+        Lis.update { copy(camera = camera.copy(snap = SnapNote("Taking the photo…", done = false))) }
+        val taking = camera.snap { photo ->
+            if (photo != null) {
+                Transfers.sendSnap(applicationContext, photo)
+            } else {
+                Lis.update { copy(camera = camera.copy(snap = SnapNote("Couldn't take the photo", failed = true))) }
+            }
+        }
+        if (!taking) Lis.update { copy(camera = camera.copy(snap = null)) }
     }
 
     private fun switchCamera() {

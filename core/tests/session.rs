@@ -36,7 +36,8 @@ impl Handler for TestHandler {
         self.trusted.lock().unwrap().remove(fingerprint);
     }
     fn open_incoming(&self, _peer: &Peer, offer: &FileOffer) -> Option<std::fs::File> {
-        self.accept_files.then(|| std::fs::File::create(self.dir.join(&offer.name)).unwrap())
+        let name = if offer.snap { format!("snap-{}", offer.name) } else { offer.name.clone() };
+        self.accept_files.then(|| std::fs::File::create(self.dir.join(name)).unwrap())
     }
     fn event(&self, event: Event) {
         let _ = self.events.send(event);
@@ -316,7 +317,7 @@ async fn a_stranger_claiming_trust_cannot_send_files() {
     let (result, events) = raw_stranger(vec![
         hello(),
         Frame::Message(Message::Auth { trusted: true }),
-        Frame::Message(Message::FileOffer(FileOffer { id: 1, name: "x".into(), size: 1 })),
+        Frame::Message(Message::FileOffer(FileOffer { id: 1, name: "x".into(), size: 1, snap: false })),
     ])
     .await;
     assert!(matches!(result, Err(SessionError::Protocol(_))), "{result:?}");
@@ -433,7 +434,7 @@ async fn a_large_file_arrives_intact() {
     let contents: Vec<u8> = (0..20_000_000u32).map(|i| (i % 251) as u8).collect();
     let (file, _keep) = temp_file(&contents);
 
-    phone.handle.send(Command::SendFile { file, name: "big.bin".into(), size: contents.len() as u64 }).await;
+    phone.handle.send(Command::SendFile { file, name: "big.bin".into(), size: contents.len() as u64, snap: false }).await;
     let (sent, received) = tokio::join!(
         timeout(Duration::from_secs(30), finished(&mut phone)),
         timeout(Duration::from_secs(30), finished(&mut pc)),
@@ -444,12 +445,22 @@ async fn a_large_file_arrives_intact() {
 }
 
 #[tokio::test]
+async fn a_snap_is_marked_as_one() {
+    let (phone, mut pc) = paired_sides().await;
+    let (file, _keep) = temp_file(b"jpeg");
+
+    phone.handle.send(Command::SendFile { file, name: "photo.jpg".into(), size: 4, snap: true }).await;
+    assert!(timeout(WAIT, finished(&mut pc)).await.unwrap());
+    assert_eq!(std::fs::read(pc.dir.path().join("snap-photo.jpg")).unwrap(), b"jpeg");
+}
+
+#[tokio::test]
 async fn control_messages_overtake_a_transfer() {
     let (phone, mut pc) = paired_sides().await;
     let contents = vec![7u8; 50_000_000];
     let (file, _keep) = temp_file(&contents);
 
-    phone.handle.send(Command::SendFile { file, name: "big.bin".into(), size: contents.len() as u64 }).await;
+    phone.handle.send(Command::SendFile { file, name: "big.bin".into(), size: contents.len() as u64, snap: false }).await;
     phone.handle.send(Command::Send(Message::LockPc)).await;
 
     loop {
@@ -469,7 +480,7 @@ async fn a_refused_file_is_reported() {
     connected(&mut pc).await;
 
     let (file, _keep) = temp_file(b"hello");
-    phone.handle.send(Command::SendFile { file, name: "x".into(), size: 5 }).await;
+    phone.handle.send(Command::SendFile { file, name: "x".into(), size: 5, snap: false }).await;
     assert!(!finished(&mut phone).await);
 }
 
@@ -478,7 +489,7 @@ async fn a_file_shorter_than_offered_fails() {
     let (mut phone, mut pc) = paired_sides().await;
     let (file, _keep) = temp_file(b"short");
 
-    phone.handle.send(Command::SendFile { file, name: "x".into(), size: 1000 }).await;
+    phone.handle.send(Command::SendFile { file, name: "x".into(), size: 1000, snap: false }).await;
     assert!(!finished(&mut pc).await);
     assert!(!finished(&mut phone).await);
 }
@@ -489,7 +500,7 @@ async fn a_dropped_connection_fails_transfers_on_both_sides() {
     let contents = vec![1u8; 200_000_000];
     let (file, _keep) = temp_file(&contents);
 
-    phone.handle.send(Command::SendFile { file, name: "big.bin".into(), size: contents.len() as u64 }).await;
+    phone.handle.send(Command::SendFile { file, name: "big.bin".into(), size: contents.len() as u64, snap: false }).await;
     pc.until(|e| matches!(e, Event::FileProgress { .. })).await;
     phone.task.abort();
 

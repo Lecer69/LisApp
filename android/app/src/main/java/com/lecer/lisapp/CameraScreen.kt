@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -24,7 +25,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.delay
 import uniffi.lis_ffi.ConnectionState
+
+/** How a photo for the PC is getting on. `done` is the last word, which clears after a moment. */
+data class SnapNote(val text: String, val done: Boolean = true, val failed: Boolean = false)
 
 data class CameraStatus(
     val running: Boolean = false,
@@ -41,6 +46,9 @@ data class CameraStatus(
     /** Sending less than chosen, as the connection can't carry more right now. */
     val limited: Boolean = false,
     val error: String? = null,
+    /** The camera takes photos beside the stream. */
+    val canSnap: Boolean = false,
+    val snap: SnapNote? = null,
 )
 
 class CameraActions(
@@ -51,6 +59,7 @@ class CameraActions(
     val setFps: (Int) -> Unit,
     val setSize: (Size) -> Unit,
     val setAspect: (CameraAspect) -> Unit,
+    val snap: () -> Unit,
     val sizes: (front: Boolean) -> List<Size>,
     val surface: (Surface?) -> Unit,
 )
@@ -59,6 +68,7 @@ class CameraActions(
 private const val PREVIEW_WIDTH = 1280
 private const val PREVIEW_HEIGHT = 720
 private const val FPS_SLACK = 5
+private const val SNAP_NOTE_MS = 4000L
 
 private fun fpsNote(camera: CameraStatus, wantedFps: Int): String = when {
     camera.targetFps in 1 until wantedFps -> " This camera only offers ${camera.targetFps} fps at ${camera.size?.label}."
@@ -88,6 +98,14 @@ fun CameraScreen(state: AppState, wantedFps: Int, wantedSize: Size, aspect: Came
     val connected = state.connection == ConnectionState.CONNECTED
     val sizes = remember(camera.front) { actions.sizes(camera.front) }
     val shape = RoundedCornerShape(12.dp)
+    val snap = camera.snap
+
+    LaunchedEffect(snap) {
+        if (snap?.done == true) {
+            delay(SNAP_NOTE_MS)
+            Lis.update { if (this.camera.snap === snap) copy(camera = this.camera.copy(snap = null)) else this }
+        }
+    }
 
     ScreenColumn(scroll = false, spacing = 10.dp) {
         ScreenHeader(
@@ -129,13 +147,26 @@ fun CameraScreen(state: AppState, wantedFps: Int, wantedSize: Size, aspect: Came
             }
         }
 
-        StatusLine(statusText(state, wantedFps), error = camera.error != null)
+        // In the status's place for a moment, so the picture doesn't jump
+        if (snap != null) {
+            StatusLine(snap.text, error = snap.failed)
+        } else {
+            StatusLine(statusText(state, wantedFps), error = camera.error != null)
+        }
 
         Column(modifier = Modifier.offset(x = (-12).dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Chips(sizes, closestSize(sizes, wantedSize), { it.label }, enabled = !camera.running, pick = actions.setSize)
             Chips(listOf(60, 30), wantedFps, { "$it fps" }, enabled = !camera.running, pick = actions.setFps)
             Chips(CameraAspect.entries, aspect, { it.label }, pick = actions.setAspect)
         }
+
+        LisButton(
+            "Snap to PC",
+            actions.snap,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+            enabled = camera.running && camera.live && camera.canSnap && snap?.done != false,
+            icon = R.drawable.ic_camera,
+        )
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
             if (camera.running) {

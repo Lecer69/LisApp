@@ -99,7 +99,7 @@ pub enum Command {
     StartPairing,
     ConfirmPairing(bool),
     Unpair,
-    SendFile { file: std::fs::File, name: String, size: u64 },
+    SendFile { file: std::fs::File, name: String, size: u64, snap: bool },
     Close,
 }
 
@@ -246,12 +246,12 @@ impl Session {
                     self.handler.event(Event::Unpaired { peer });
                 }
             }
-            Command::SendFile { file, name, size } => {
+            Command::SendFile { file, name, size, snap } => {
                 if self.active() {
                     let id = self.next_file_id;
                     self.next_file_id += 1;
                     self.outgoing.insert(id, Outgoing { name: name.clone(), size, file: Some(file), task: None });
-                    self.send(Message::FileOffer(FileOffer { id, name, size })).await?;
+                    self.send(Message::FileOffer(FileOffer { id, name, size, snap })).await?;
                 } else if let Some(peer) = self.peer.clone() {
                     let file = FileStatus { peer, id: 0, name, incoming: false };
                     self.handler.event(Event::FileFinished { file, ok: false });

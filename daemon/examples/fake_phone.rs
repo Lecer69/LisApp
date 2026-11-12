@@ -1,12 +1,14 @@
 //! A stand-in for the Android app, for working on the PC side without a phone. It pairs as soon as
 //! the PC lets it, accepts the code by itself, then sends figures. With a video file it also acts as
-//! the camera, looping the file, which makes a test source for the OBS plugin:
+//! the camera, looping the file, which makes a test source for the OBS plugin. With a JPEG it answers
+//! Take Photo in the shell with it, as a snap:
 //!
 //! ffmpeg -f lavfi -i testsrc2=s=1920x1080:r=60 -t 10 -c:v libx264 -bf 0 -g 60 -x264-params aud=1 -f h264 test.h264
-//! cargo run -p lis-daemon --example fake_phone -- [host] [port] [test.h264]
+//! cargo run -p lis-daemon --example fake_phone -- [host] [port] [test.h264] [photo.jpg]
 
 use lis_core::video::h264::split_access_units;
 use lis_ffi::{ActionButton, ClientListener, ConnectionState, LisClient, MediaInfo, PcStats, PhoneStats, VideoConfig, VideoState};
+use std::os::fd::IntoRawFd;
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -14,6 +16,7 @@ const CAMERA_FPS: u32 = 60;
 
 static CLIENT: OnceLock<Arc<LisClient>> = OnceLock::new();
 static CAMERA_FILE: OnceLock<String> = OnceLock::new();
+static SNAP_FILE: OnceLock<String> = OnceLock::new();
 static CAMERA: Once = Once::new();
 
 fn client() -> &'static LisClient {
@@ -56,6 +59,19 @@ impl ClientListener for Listener {
     }
     fn on_unlock_result(&self, ok: bool, reason: String) {
         println!("unlock: {ok} {reason}");
+    }
+    fn on_snap_request(&self) {
+        println!("snap requested");
+        let Some(path) = SNAP_FILE.get() else { return };
+        match std::fs::File::open(path) {
+            Ok(file) => {
+                let name = format!("Snap {}.jpg", std::process::id());
+                if let Err(error) = client().send_snap(file.into_raw_fd(), name, 0) {
+                    println!("can't send the snap: {error}");
+                }
+            }
+            Err(error) => println!("can't open {path}: {error}"),
+        }
     }
     fn on_state(&self, state: ConnectionState, pc_name: Option<String>) {
         println!("state: {state:?} {}", pc_name.unwrap_or_default());
@@ -142,8 +158,12 @@ fn main() {
     let host = args.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
     let port = args.get(1).and_then(|port| port.parse().ok()).unwrap_or(lis_core::protocol::DEFAULT_PORT);
 
-    if let Some(file) = args.get(2) {
-        let _ = CAMERA_FILE.set(file.clone());
+    for file in args.iter().skip(2) {
+        if file.ends_with(".jpg") || file.ends_with(".jpeg") {
+            let _ = SNAP_FILE.set(file.clone());
+        } else {
+            let _ = CAMERA_FILE.set(file.clone());
+        }
     }
 
     // The same folder each time, so it stays one paired phone

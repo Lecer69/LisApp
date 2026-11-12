@@ -39,6 +39,9 @@ pub struct FileOffer {
     pub id: u64,
     pub name: String,
     pub size: u64,
+    /// A photo from the phone's Camera screen. An older PC treats it as any file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub snap: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -94,6 +97,8 @@ pub enum Message {
     FileAck { id: u64, ok: bool },
     RingPhone { ring: bool },
     PhoneRinging { ringing: bool },
+    /// Take a photo, if the camera is running.
+    SnapRequest,
     /// The PC's copy of a document, whenever it changes.
     SyncDoc { kind: String, rev: String, doc: serde_json::Value },
     /// The phone's merged copy, taken only if the PC's is still `based_on`.
@@ -215,7 +220,8 @@ mod tests {
             Frame::Message(Message::Ping),
             Frame::Message(Message::Hello { protocol: 1, name: "Phone ✓".into() }),
             Frame::Message(Message::PhoneStats(PhoneStats { battery_percent: 80, ..Default::default() })),
-            Frame::Message(Message::FileOffer(FileOffer { id: 3, name: "سلام.txt".into(), size: 5 })),
+            Frame::Message(Message::FileOffer(FileOffer { id: 3, name: "سلام.txt".into(), size: 5, snap: false })),
+            Frame::Message(Message::FileOffer(FileOffer { id: 4, name: "Snap.jpg".into(), size: 9, snap: true })),
             Frame::Chunk { id: 7, data: vec![1, 2, 3] },
             Frame::Chunk { id: 7, data: vec![] },
         ] {
@@ -236,6 +242,7 @@ mod tests {
             Message::MediaControl { action: MediaAction::PlayPause },
             Message::Actions { actions: vec![ActionInfo { id: "a".into(), name: "Main scene".into() }] },
             Message::UnlockRequest,
+            Message::SnapRequest,
             Message::UnlockResponse { nonce: "n".into(), signature: "s".into() },
         ] {
             let frame = Frame::Message(message);
@@ -277,6 +284,14 @@ mod tests {
     }
 
     #[test]
+    fn a_plain_file_offer_reads_the_same_on_both_versions() {
+        let offer = FileOffer { id: 1, name: "a".into(), size: 2, snap: false };
+        assert_eq!(serde_json::to_value(&offer).unwrap(), serde_json::json!({ "id": 1, "name": "a", "size": 2 }));
+        let old: FileOffer = serde_json::from_str(r#"{"id":1,"name":"a","size":2}"#).unwrap();
+        assert_eq!(old, offer);
+    }
+
+    #[test]
     fn data_needs_pairing() {
         assert!(!Message::LockPc.allowed_unpaired());
         assert!(!Message::Unpair.allowed_unpaired());
@@ -284,6 +299,7 @@ mod tests {
         assert!(!Message::FileAccept { id: 1 }.allowed_unpaired());
         assert!(!Message::UnlockRequest.allowed_unpaired());
         assert!(!Message::RunAction { id: "a".into() }.allowed_unpaired());
+        assert!(!Message::SnapRequest.allowed_unpaired());
         assert!(!Message::SyncPush { kind: "todo".into(), based_on: String::new(), doc: serde_json::Value::Null }.allowed_unpaired());
         assert!(Message::Ping.allowed_unpaired());
     }

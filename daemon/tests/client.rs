@@ -34,6 +34,7 @@ enum Heard {
     UnlockPrompt,
     UnlockChallenge(String),
     UnlockResult(bool, String),
+    SnapRequest,
 }
 
 #[derive(Clone)]
@@ -100,6 +101,9 @@ impl ClientListener for Listener {
     }
     fn on_unlock_result(&self, ok: bool, reason: String) {
         self.heard.lock().unwrap().push(Heard::UnlockResult(ok, reason));
+    }
+    fn on_snap_request(&self) {
+        self.heard.lock().unwrap().push(Heard::SnapRequest);
     }
 }
 
@@ -366,6 +370,77 @@ fn an_unreachable_pc_reports_disconnected_and_keeps_trying() {
     app.clear();
     app.client.reconnect_now();
     app.state(ConnectionState::Connecting);
+}
+
+fn jpeg() -> Vec<u8> {
+    let image = image::RgbImage::from_pixel(32, 24, image::Rgb([200, 30, 30]));
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut bytes).encode_image(&image).unwrap();
+    bytes
+}
+
+fn send_snap(app: &App, name: &str) {
+    let source = app.received.path().join(name);
+    std::fs::write(&source, jpeg()).unwrap();
+    let fd = std::fs::File::open(&source).unwrap().into_raw_fd();
+    app.clear();
+    app.client.send_snap(fd, name.into(), 0).unwrap();
+    app.wait("the photo sent", |heard| *heard == Heard::Finished(name.into(), false, true));
+}
+
+#[test]
+fn a_snap_lands_in_pictures_and_on_the_clipboard() {
+    let (rt, pc) = start();
+    let app = App::new();
+    app.pair(&rt, &pc);
+
+    send_snap(&app, "Snap 2026-11-12 10-00-00.jpg");
+    let saved = pc.home.path().join("Pictures/Phone/Snap 2026-11-12 10-00-00.jpg");
+    assert_eq!(std::fs::read(&saved).unwrap(), jpeg());
+    assert!(!pc.downloads().join("Snap 2026-11-12 10-00-00.jpg").exists());
+
+    rt.block_on(pc.log_until("wl-copy", "[--type] [image/png]"));
+    let shown = rt.block_on(pc.log_until("notify-send", "Photo from Test Phone"));
+    assert!(shown.contains(&format!("[string:image-path:{}]", saved.display())), "{shown}");
+    assert!(shown.contains("copied to the clipboard"), "{shown}");
+    let copied = std::fs::read(pc.home.path().join("wl-copy.in")).unwrap();
+    assert_eq!(image::guess_format(&copied).unwrap(), image::ImageFormat::Png);
+}
+
+#[test]
+fn the_shell_chooses_the_snap_folder_and_the_clipboard() {
+    let (rt, pc) = start();
+    let app = App::new();
+    app.pair(&rt, &pc);
+
+    let folder = pc.home.path().join("Snaps");
+    let error = rt.block_on(pc.request(json!({ "cmd": "snap_settings", "folder": "Snaps", "clipboard": false })));
+    assert_eq!(error["ok"], json!(false));
+    rt.block_on(pc.ok(json!({ "cmd": "snap_settings", "folder": folder.to_str().unwrap(), "clipboard": false })));
+    assert_eq!(rt.block_on(pc.status())["snap"], json!({ "folder": folder.to_str().unwrap(), "clipboard": false }));
+
+    send_snap(&app, "a.jpg");
+    send_snap(&app, "a.jpg");
+    assert_eq!(std::fs::read(folder.join("a.jpg")).unwrap(), jpeg());
+    assert!(folder.join("a (1).jpg").exists());
+    let shown = rt.block_on(pc.log_until("notify-send", "a (1).jpg"));
+    assert!(!shown.contains("clipboard"), "{shown}");
+    assert_eq!(pc.log("wl-copy"), "");
+
+    rt.block_on(pc.ok(json!({ "cmd": "snap_settings", "folder": "", "clipboard": true })));
+    let status = rt.block_on(pc.status());
+    assert_eq!(status["snap"]["folder"], json!(pc.home.path().join("Pictures/Phone").to_str().unwrap()));
+}
+
+#[test]
+fn the_pc_can_ask_the_running_camera_for_a_photo() {
+    let (rt, pc) = start();
+    let refused = rt.block_on(pc.request(json!({ "cmd": "snap" })));
+    assert_eq!(refused["error"], json!("The phone's camera isn't on"));
+
+    let (app, _stream) = camera_live(&rt, &pc);
+    rt.block_on(pc.ok(json!({ "cmd": "snap" })));
+    app.wait("the request", |heard| *heard == Heard::SnapRequest);
 }
 
 fn camera_config() -> VideoConfig {

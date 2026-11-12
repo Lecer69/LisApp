@@ -3,6 +3,7 @@
 use crate::actions::{self, Action, Actions};
 use crate::camera::Camera;
 use crate::media::Media;
+use crate::snap;
 use crate::stats::{hostname, Sampler};
 use crate::sync::{Applied, SyncStore};
 use lis_core::identity::{write_private, Identity};
@@ -40,6 +41,8 @@ pub struct Paths {
     pub socket: PathBuf,
     pub camera_socket: PathBuf,
     pub downloads: PathBuf,
+    /// Photos from the Camera screen, unless the shell names another folder.
+    pub snaps: PathBuf,
     /// The shell's own data, where its todo, goals and notes live.
     pub shell_data: PathBuf,
 }
@@ -69,6 +72,19 @@ struct PairCode {
 struct IncomingFile {
     part: PathBuf,
     done: PathBuf,
+    snap: bool,
+}
+
+/// From the shell's settings.
+struct SnapSettings {
+    folder: Option<PathBuf>,
+    clipboard: bool,
+}
+
+impl Default for SnapSettings {
+    fn default() -> Self {
+        Self { folder: None, clipboard: true }
+    }
 }
 
 /// Each alert goes out once, until the battery has recovered or the phone has been unplugged.
@@ -152,6 +168,7 @@ struct State {
     lock: LockState,
     locked_from_phone: Option<Instant>,
     usb: UsbState,
+    snap: SnapSettings,
 }
 
 pub struct Daemon {
@@ -317,6 +334,7 @@ impl Daemon {
             "phones": phones,
             "camera": self.camera.status(),
             "usb": { "enabled": state.usb.enabled, "forwarding": state.usb.forwarding },
+            "snap": { "folder": self.snap_folder(&state).display().to_string(), "clipboard": state.snap.clipboard },
             "lock": { "locked": state.lock.locked, "password_required": state.lock.password_required, "blocked": state.lock.blocked },
             "actions": self.actions.list(),
         })
@@ -433,7 +451,34 @@ impl Daemon {
         if !metadata.is_file() {
             return Err("Not a file".to_string());
         }
-        handle.send(Command::SendFile { file, name, size: metadata.len() }).await;
+        handle.send(Command::SendFile { file, name, size: metadata.len(), snap: false }).await;
+        Ok(())
+    }
+
+    fn snap_folder(&self, state: &State) -> PathBuf {
+        state.snap.folder.clone().unwrap_or_else(|| self.paths.snaps.clone())
+    }
+
+    /// An empty folder is the default one.
+    pub fn set_snap_settings(&self, folder: &str, clipboard: bool) -> Result<(), String> {
+        let folder = match folder {
+            "" => None,
+            folder if Path::new(folder).is_absolute() => Some(PathBuf::from(folder)),
+            _ => return Err("The folder needs a full path".to_string()),
+        };
+        let mut state = self.state.lock().unwrap();
+        state.snap = SnapSettings { folder, clipboard };
+        drop(state);
+        self.publish_status();
+        Ok(())
+    }
+
+    /// Only the running camera can take one, so it goes to the phone that's streaming.
+    pub fn request_snap(&self) -> Result<(), String> {
+        let phone = self.camera.live_phone().ok_or("The phone's camera isn't on")?;
+        let state = self.state.lock().unwrap();
+        let link = state.links.get(&phone).filter(|link| link.paired).ok_or("The phone isn't connected")?;
+        let _ = self.outbox.send((link.handle.clone(), Message::SnapRequest));
         Ok(())
     }
 
@@ -760,9 +805,11 @@ impl Daemon {
 
     fn on_file_finished(&self, file: lis_core::session::FileStatus, ok: bool) {
         let mut saved_as = None;
+        let mut snapped = false;
         if file.incoming {
             let reserved = self.state.lock().unwrap().incoming.remove(&(file.peer.fingerprint.clone(), file.id));
             if let Some(reserved) = reserved {
+                snapped = reserved.snap;
                 if ok && fs::rename(&reserved.part, &reserved.done).is_ok() {
                     saved_as = Some(reserved.done);
                 } else {
@@ -772,7 +819,10 @@ impl Daemon {
         }
 
         let delivered = if file.incoming { saved_as.is_some() } else { ok };
-        if let Some(path) = &saved_as {
+        if let (Some(path), true) = (&saved_as, snapped) {
+            let clipboard = self.state.lock().unwrap().snap.clipboard;
+            snap::deliver(file.peer.name.clone(), path.clone(), clipboard);
+        } else if let Some(path) = &saved_as {
             notify(&format!("File from {}", file.peer.name), &path.display().to_string());
         } else if !delivered {
             notify("Lis App", &format!("Couldn't transfer {}", file.name));
@@ -783,6 +833,7 @@ impl Daemon {
                 "name": file.name,
                 "incoming": file.incoming,
                 "ok": delivered,
+                "snap": snapped,
                 "path": saved_as.map(|path| path.display().to_string()),
             }),
         );
@@ -865,9 +916,11 @@ impl Handler for Daemon {
 
     fn open_incoming(&self, peer: &Peer, offer: &FileOffer) -> Option<fs::File> {
         let name = safe_file_name(&offer.name);
-        match reserve(&self.paths.downloads, &name) {
+        let dir = if offer.snap { self.snap_folder(&self.state.lock().unwrap()) } else { self.paths.downloads.clone() };
+        match reserve(&dir, &name) {
             Ok((file, part, done)) => {
-                self.state.lock().unwrap().incoming.insert((peer.fingerprint.clone(), offer.id), IncomingFile { part, done });
+                let incoming = IncomingFile { part, done, snap: offer.snap };
+                self.state.lock().unwrap().incoming.insert((peer.fingerprint.clone(), offer.id), incoming);
                 Some(file)
             }
             Err(error) => {
