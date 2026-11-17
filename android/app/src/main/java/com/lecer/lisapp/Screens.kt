@@ -54,6 +54,7 @@ sealed interface Screen {
     data object Home : Screen
     data object Settings : Screen
     data object Camera : Screen
+    data object Logs : Screen
     data class Organizer(val page: OrganizerPage) : Screen
 }
 
@@ -75,6 +76,7 @@ class ScreenActions(
     val openCamera: () -> Unit,
     val openPage: (OrganizerPage) -> Unit,
     val openSettings: () -> Unit,
+    val openLogs: () -> Unit,
     val stopRinging: () -> Unit,
     val mediaCommand: (MediaCommand) -> Unit,
     val setVolume: (Int) -> Unit,
@@ -92,7 +94,11 @@ fun shortStatus(state: AppState): String = when (state.connection) {
     ConnectionState.CONNECTED -> state.pcStats?.let { "Connected · up ${duration(it.uptimeSecs)}" } ?: "Connected"
     ConnectionState.CONNECTING -> "Connecting…"
     ConnectionState.UNPAIRED, ConnectionState.WRONG_PC -> "Not connected"
-    ConnectionState.DISCONNECTED -> if (state.usbMode) "Waiting for the USB cable…" else "Looking for the PC…"
+    ConnectionState.DISCONNECTED -> when {
+        state.usbMode -> "Waiting for the USB cable…"
+        state.paused -> "Paused while Wi-Fi is off"
+        else -> "Looking for the PC…"
+    }
 }
 
 private fun problem(state: AppState): String? = when (state.connection) {
@@ -231,7 +237,10 @@ private fun HomeScreen(state: AppState, settings: AppSettings, setup: SetupState
     }
 
     ScreenColumn {
-        ScreenHeader(name, shortStatus(state)) { SettingsButton(setup, actions.openSettings) }
+        ScreenHeader(name, shortStatus(state)) {
+            IconTap(R.drawable.ic_logs, "Logs", actions.openLogs)
+            SettingsButton(setup, actions.openSettings)
+        }
 
         problem(state)?.let { StatusLine(it, error = true) }
 

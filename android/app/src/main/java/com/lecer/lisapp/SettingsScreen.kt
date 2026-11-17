@@ -96,6 +96,12 @@ fun SettingsScreen(state: AppState, settings: AppSettings, setup: SetupState, ac
                 ChoiceRow("Look for the cable every", null, listOf(2, 5, 10, 30), settings.usbRetrySeconds, ::seconds) {
                     set { copy(usbRetrySeconds = it) }
                 }
+            } else {
+                ToggleRow(
+                    "Pause while Wi-Fi is off",
+                    "Saves battery. Turn it off if the PC uses this phone's hotspot.",
+                    settings.pauseWithoutWifi,
+                ) { set { copy(pauseWithoutWifi = it) } }
             }
             ToggleRow(
                 "Stay connected in the background",
@@ -134,6 +140,9 @@ fun SettingsScreen(state: AppState, settings: AppSettings, setup: SetupState, ac
         }
         ToggleRow("PC is locked", "Tap it to unlock with your fingerprint", settings.notifyPcLocked) {
             set { copy(notifyPcLocked = it) }
+        }
+        ToggleRow("PC turned on", "When it connects after a boot", settings.notifyPcOn) {
+            set { copy(notifyPcOn = it) }
         }
         SettingRow("Sounds and categories", "Android's own settings for each kind", onClick = actions.openNotificationSettings) {
             Forward()

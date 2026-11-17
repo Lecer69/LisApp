@@ -8,6 +8,8 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.IBinder
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -30,10 +32,26 @@ class SyncService : Service() {
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
+            if (Lis.state.value.paused) return
             Lis.client.reconnectNow()
             discovery.restart()
             StatsReporter.sendNow(this@SyncService)
         }
+    }
+
+    /** Any Wi-Fi, with or without internet, as the PC is usually on the same one. */
+    private val wifiNetworks = mutableSetOf<Network>()
+    private val wifiCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) = changeWifi { add(network) }
+        override fun onLost(network: Network) = changeWifi { remove(network) }
+    }
+
+    private fun changeWifi(change: MutableSet<Network>.() -> Unit) {
+        val on = synchronized(wifiNetworks) {
+            wifiNetworks.change()
+            wifiNetworks.isNotEmpty()
+        }
+        Lis.setWifi(on)
     }
 
     /** The PC hears about the charger at once, rather than at the next round of figures. */
@@ -54,7 +72,16 @@ class SyncService : Service() {
     override fun onCreate() {
         super.onCreate()
         discovery = Discovery(this) { found -> onFound(found) }
-        getSystemService<ConnectivityManager>()?.registerDefaultNetworkCallback(networkCallback)
+        getSystemService<ConnectivityManager>()?.let { manager ->
+            manager.registerDefaultNetworkCallback(networkCallback)
+            val active = manager.getNetworkCapabilities(manager.activeNetwork)
+            Lis.setWifi(active?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true)
+            val wifi = NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            manager.registerNetworkCallback(wifi, wifiCallback)
+        }
         val power = IntentFilter().apply {
             addAction(Intent.ACTION_POWER_CONNECTED)
             addAction(Intent.ACTION_POWER_DISCONNECTED)
@@ -62,10 +89,13 @@ class SyncService : Service() {
         ContextCompat.registerReceiver(this, chargingReceiver, power, ContextCompat.RECEIVER_NOT_EXPORTED)
 
         scope.launch {
-            Lis.state.map { it.connection to it.pcName }.distinctUntilChanged().collect { (connection, name) ->
-                Notifications.showService(this@SyncService, statusText(connection, name))
-                if (connection == ConnectionState.CONNECTED) discovery.stop() else discovery.start()
+            Lis.state.map { Triple(it.connection, it.pcName, it.paused) }.distinctUntilChanged().collect { (connection, name, paused) ->
+                Notifications.showService(this@SyncService, statusText(connection, name, paused))
+                if (connection == ConnectionState.CONNECTED || paused) discovery.stop() else discovery.start()
             }
+        }
+        scope.launch {
+            Prefs.settings.map { it.pauseWithoutWifi }.distinctUntilChanged().collect { Lis.refreshPause() }
         }
         scope.launch {
             Prefs.settings.map { it.statsSeconds }.distinctUntilChanged().collectLatest { seconds ->
@@ -90,7 +120,7 @@ class SyncService : Service() {
         try {
             startForeground(
                 Notifications.SERVICE_ID,
-                Notifications.service(this, statusText(state.connection, state.pcName)),
+                Notifications.service(this, statusText(state.connection, state.pcName, state.paused)),
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
             )
         } catch (error: RuntimeException) {
@@ -117,7 +147,10 @@ class SyncService : Service() {
         scope.cancel()
         discovery.stop()
         unregisterReceiver(chargingReceiver)
-        getSystemService<ConnectivityManager>()?.unregisterNetworkCallback(networkCallback)
+        getSystemService<ConnectivityManager>()?.let { manager ->
+            manager.unregisterNetworkCallback(networkCallback)
+            manager.unregisterNetworkCallback(wifiCallback)
+        }
         super.onDestroy()
     }
 
@@ -135,6 +168,11 @@ class SyncService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, SyncService::class.java))
+        }
+
+        private fun statusText(connection: ConnectionState, name: String?, paused: Boolean): String = when {
+            paused && connection != ConnectionState.CONNECTED -> "Paused while Wi-Fi is off"
+            else -> statusText(connection, name)
         }
 
         private fun statusText(connection: ConnectionState, name: String?): String = when (connection) {

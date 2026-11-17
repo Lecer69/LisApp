@@ -19,10 +19,12 @@ object Notifications {
     private const val RING_CHANNEL = "ring"
     private const val LOCK_CHANNEL = "pc_lock"
     private const val PROMPT_CHANNEL = "pc_unlock_prompt"
+    private const val PC_ON_CHANNEL = "pc_on"
     private const val MEDIA_ID = 2
     private const val RING_ID = 3
     private const val LOCK_ID = 4
     private const val PROMPT_ID = 5
+    private const val PC_ON_ID = 6
     private const val PROMPT_SHOWS_MS = 30_000L
 
     fun createChannels(context: Context) {
@@ -45,6 +47,9 @@ object Notifications {
         )
         manager.createNotificationChannel(
             NotificationChannel(LOCK_CHANNEL, "PC locked", NotificationManager.IMPORTANCE_LOW),
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(PC_ON_CHANNEL, "PC turned on", NotificationManager.IMPORTANCE_DEFAULT),
         )
         // High, or it can't open by itself or show as a banner
         manager.createNotificationChannel(
@@ -136,6 +141,18 @@ object Notifications {
         UnlockActivity.intent(context),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
+
+    fun showPcOn(context: Context, pcName: String) {
+        if (!Prefs.current.notifyPcOn) return
+        val notification = Notification.Builder(context, PC_ON_CHANNEL)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("$pcName turned on")
+            .setContentText("Connected again")
+            .setContentIntent(openApp(context))
+            .setAutoCancel(true)
+            .build()
+        context.getSystemService<NotificationManager>()?.notify(PC_ON_ID, notification)
+    }
 
     fun showPcLocked(context: Context, pcName: String) {
         if (!Prefs.current.notifyPcLocked) return

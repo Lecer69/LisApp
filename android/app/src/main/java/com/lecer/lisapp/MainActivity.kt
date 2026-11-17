@@ -76,6 +76,7 @@ class MainActivity : ComponentActivity() {
             openCamera = ::openCamera,
             openPage = { screen = Screen.Organizer(it) },
             openSettings = { screen = Screen.Settings },
+            openLogs = { screen = Screen.Logs },
             stopRinging = { Ringer.stop(this) },
             mediaCommand = { Lis.client.mediaCommand(it) },
             setVolume = { Lis.client.mediaSetVolume(it.toUByte()) },
@@ -144,6 +145,10 @@ class MainActivity : ComponentActivity() {
                         is Screen.Organizer -> {
                             BackHandler(onBack = ::closePage)
                             OrganizerScreen(shown.page, ::closePage)
+                        }
+                        Screen.Logs -> {
+                            BackHandler { screen = Screen.Home }
+                            LogsScreen { screen = Screen.Home }
                         }
                         Screen.Settings -> {
                             BackHandler { screen = Screen.Home }

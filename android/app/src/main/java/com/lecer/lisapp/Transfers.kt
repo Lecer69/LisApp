@@ -16,6 +16,13 @@ import java.util.concurrent.ConcurrentHashMap
 object Transfers {
     private const val TAG = "LisFiles"
     private val incoming = ConcurrentHashMap<ULong, Uri>()
+    /** Sizes for the log: incoming by id, outgoing by name, as an outgoing id comes later. */
+    private val incomingSizes = ConcurrentHashMap<ULong, Long>()
+    private val outgoingSizes = ConcurrentHashMap<String, Long>()
+
+    fun noteIncomingSize(id: ULong, size: Long) {
+        incomingSizes[id] = size
+    }
     /** Photos on their way, by name, which two taken in the same second can share. */
     private val snaps = mutableListOf<String>()
     private val SNAP_NAME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH-mm-ss")
@@ -32,6 +39,7 @@ object Transfers {
                 file.delete()
             }
             synchronized(snaps) { snaps.add(name) }
+            outgoingSizes[name] = photo.size.toLong()
             Lis.client.sendSnap(descriptor.detachFd(), name, photo.size.toULong())
             snapNote(SnapNote("Sending the photo…", done = false))
         } catch (error: Exception) {
@@ -63,6 +71,7 @@ object Transfers {
             }
             val descriptor = context.contentResolver.openFileDescriptor(uri, "r")
                 ?: throw IllegalStateException("no descriptor")
+            outgoingSizes[name] = size
             Lis.client.sendFile(descriptor.detachFd(), name, size.toULong())
             Lis.update { copy(transfer = "Sending $name") }
         } catch (error: Exception) {
@@ -94,6 +103,14 @@ object Transfers {
     }
 
     fun finish(context: Context, id: ULong, name: String, isIncoming: Boolean, ok: Boolean) {
+        val size = if (isIncoming) incomingSizes.remove(id) else outgoingSizes.remove(name)
+        val verb = if (isIncoming) "Received" else "Sent"
+        EventLog.add(
+            if (isIncoming) EventKind.FILE_RECEIVED else EventKind.FILE_SENT,
+            if (ok) "$verb $name" else "Couldn't ${if (isIncoming) "receive" else "send"} $name",
+            size,
+            failed = !ok,
+        )
         if (!isIncoming && synchronized(snaps) { snaps.remove(name) }) {
             snapNote(if (ok) SnapNote("Sent to the PC") else SnapNote("Couldn't send the photo", failed = true))
             return

@@ -29,6 +29,9 @@ data class AppState(
     val camera: CameraStatus = CameraStatus(),
     val ringing: Boolean = false,
     val usbMode: Boolean = false,
+    val wifiOff: Boolean = false,
+    /** Wi-Fi is off, so nothing looks for the PC, to save battery. The cable still works. */
+    val paused: Boolean = false,
     val media: MediaInfo? = null,
     val actions: List<ActionButton> = emptyList(),
     val actionMessage: String? = null,
@@ -71,6 +74,7 @@ object Lis {
     fun init(context: Context) {
         appContext = context.applicationContext
         Prefs.init(appContext)
+        EventLog.init(appContext)
         Notifications.createChannels(appContext)
         client = LisClient(appContext.filesDir.absolutePath, deviceName(appContext), Listener())
         val usb = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getBoolean(PREFERENCE_USB, false)
@@ -81,6 +85,7 @@ object Lis {
 
     /** To the paired PC, over the cable or the network. */
     fun connectToPc() {
+        if (state.value.paused) return
         val pc = client.pairedPc() ?: return
         client.connect(if (state.value.usbMode) USB_HOST else pc.host, pc.port)
     }
@@ -88,7 +93,21 @@ object Lis {
     fun setUsbMode(on: Boolean) {
         appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit().putBoolean(PREFERENCE_USB, on).apply()
         update { copy(usbMode = on) }
+        refreshPause()
         connectToPc()
+    }
+
+    fun setWifi(on: Boolean) {
+        update { copy(wifiOff = !on) }
+        refreshPause()
+    }
+
+    fun refreshPause() {
+        val current = state.value
+        val paused = !current.usbMode && current.wifiOff && Prefs.current.pauseWithoutWifi
+        if (paused == current.paused) return
+        update { copy(paused = paused) }
+        if (paused) client.disconnect() else connectToPc()
     }
 
     private fun deviceName(context: Context): String =
@@ -128,14 +147,42 @@ object Lis {
         SyncDocs.clear()
     }
 
+    private const val PREFERENCE_PC_BOOT = "pc_boot_at"
+    /** Only a PC up for less than this has just turned on. */
+    private const val BOOT_WINDOW_SECS = 15 * 60L
+    /** Boot times from two readings of the uptime differ by a little. */
+    private const val SAME_BOOT_MS = 2 * 60_000L
+
+    /** The first figures of each connection tell whether the PC booted since it was last seen. */
+    private var checkedBoot = false
+
+    private fun pcLabel(): String = state.value.pcName ?: state.value.paired?.name ?: "the PC"
+
+    private fun noteUptime(uptime: ULong) {
+        if (checkedBoot) return
+        checkedBoot = true
+        val preferences = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+        val bootAt = System.currentTimeMillis() - uptime.toLong() * 1000
+        val known = preferences.getLong(PREFERENCE_PC_BOOT, 0L)
+        if (kotlin.math.abs(bootAt - known) < SAME_BOOT_MS) return
+        preferences.edit().putLong(PREFERENCE_PC_BOOT, bootAt).apply()
+        if (uptime.toLong() > BOOT_WINDOW_SECS) return
+        EventLog.add(EventKind.PC_ON, "${pcLabel()} turned on")
+        Notifications.showPcOn(appContext, pcLabel())
+    }
+
     private class Listener : ClientListener {
         override fun onState(state: ConnectionState, pcName: String?) {
+            val was = Lis.state.value.connection
             update { copy(connection = state, pcName = pcName ?: this.pcName) }
             refreshPaired()
             if (state == ConnectionState.UNPAIRED && wantsPairing) startPairing()
             if (state == ConnectionState.CONNECTED) {
+                checkedBoot = false
+                EventLog.add(EventKind.CONNECTED, "Connected to ${pcLabel()}")
                 StatsReporter.sendNow(appContext)
             } else {
+                if (was == ConnectionState.CONNECTED) EventLog.add(EventKind.DISCONNECTED, "Disconnected from ${pcLabel()}")
                 update { copy(media = null, actions = emptyList(), pcLocked = false, unlockAvailable = false) }
                 MediaRemote.clear(appContext)
                 Notifications.cancelPcLocked(appContext)
@@ -154,11 +201,14 @@ object Lis {
         }
 
         override fun onPcStats(stats: PcStats) {
+            noteUptime(stats.uptimeSecs)
             update { copy(pcStats = stats) }
         }
 
-        override fun openIncomingFile(id: ULong, name: String, size: ULong): Int =
-            Transfers.openIncoming(appContext, id, name)
+        override fun openIncomingFile(id: ULong, name: String, size: ULong): Int {
+            Transfers.noteIncomingSize(id, size.toLong())
+            return Transfers.openIncoming(appContext, id, name)
+        }
 
         override fun onFileProgress(id: ULong, name: String, incoming: Boolean, done: ULong, total: ULong) {
             val percent = if (total > 0u) (done.toDouble() * 100 / total.toDouble()).toInt() else 0

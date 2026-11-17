@@ -21,8 +21,10 @@ data class AppSettings(
     val usbRetrySeconds: Int = 5,
     val statsSeconds: Int = 60,
     val reportCharging: Boolean = true,
+    val pauseWithoutWifi: Boolean = true,
     val notifyFiles: Boolean = true,
     val notifyPcLocked: Boolean = true,
+    val notifyPcOn: Boolean = true,
     val mediaControls: Boolean = true,
     val volumeStep: Int = 5,
     val unlockPopUp: Boolean = true,
@@ -76,8 +78,10 @@ object Prefs {
             usbRetrySeconds = json.optInt("usbRetrySeconds", d.usbRetrySeconds),
             statsSeconds = json.optInt("statsSeconds", d.statsSeconds),
             reportCharging = json.optBoolean("reportCharging", d.reportCharging),
+            pauseWithoutWifi = json.optBoolean("pauseWithoutWifi", d.pauseWithoutWifi),
             notifyFiles = json.optBoolean("notifyFiles", d.notifyFiles),
             notifyPcLocked = json.optBoolean("notifyPcLocked", d.notifyPcLocked),
+            notifyPcOn = json.optBoolean("notifyPcOn", d.notifyPcOn),
             mediaControls = json.optBoolean("mediaControls", d.mediaControls),
             volumeStep = json.optInt("volumeStep", d.volumeStep),
             unlockPopUp = json.optBoolean("unlockPopUp", d.unlockPopUp),
@@ -104,8 +108,10 @@ object Prefs {
         .put("usbRetrySeconds", settings.usbRetrySeconds)
         .put("statsSeconds", settings.statsSeconds)
         .put("reportCharging", settings.reportCharging)
+        .put("pauseWithoutWifi", settings.pauseWithoutWifi)
         .put("notifyFiles", settings.notifyFiles)
         .put("notifyPcLocked", settings.notifyPcLocked)
+        .put("notifyPcOn", settings.notifyPcOn)
         .put("mediaControls", settings.mediaControls)
         .put("volumeStep", settings.volumeStep)
         .put("unlockPopUp", settings.unlockPopUp)
