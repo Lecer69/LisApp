@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Builds Lis App: installs lis-daemon and the OBS plugin on this PC, and puts the APK in output/ for
-# the phone.
+# Builds Lis App: installs lis-daemon and the OBS plugin on this PC, and puts the APK for the phone
+# and the relay server's binary in output/.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -9,6 +9,7 @@ plugin_dir="${XDG_CONFIG_HOME:-$HOME/.config}/obs-studio/plugins/lis-camera/bin/
 built_apk="$root/android/app/build/outputs/apk/debug/app-debug.apk"
 output_dir="$root/output"
 rust_target=aarch64-linux-android
+relay_target=x86_64-unknown-linux-musl
 port=47420
 
 export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
@@ -16,16 +17,19 @@ export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}"
 do_daemon=true
 do_plugin=true
 do_apk=true
+do_relay=true
 
 usage() {
     cat <<USAGE
 Usage: ./install.sh [option]
 
-Installs lis-daemon to $bin_dir and the OBS plugin, and builds the Android app into output/.
+Installs lis-daemon to $bin_dir and the OBS plugin, and builds the Android app and the relay server
+into output/.
 
   --daemon-only   Only the PC daemon
   --plugin-only   Only the OBS plugin
   --apk-only      Only the Android app
+  --relay-only    Only the relay server
   -h, --help      Show this
 USAGE
 }
@@ -44,9 +48,10 @@ fi
 
 case ${1:-} in
     "") ;;
-    --daemon-only) do_plugin=false do_apk=false ;;
-    --plugin-only) do_daemon=false do_apk=false ;;
-    --apk-only) do_daemon=false do_plugin=false ;;
+    --daemon-only) do_plugin=false do_apk=false do_relay=false ;;
+    --plugin-only) do_daemon=false do_apk=false do_relay=false ;;
+    --apk-only) do_daemon=false do_plugin=false do_relay=false ;;
+    --relay-only) do_daemon=false do_plugin=false do_apk=false ;;
     -h | --help)
         usage
         exit 0
@@ -131,6 +136,35 @@ read_proxy() {
     esac
 }
 
+# Static with musl, so it runs on a server with an older glibc. Falls back to this PC's glibc.
+build_relay() {
+    step "Building the relay server"
+    need cargo "Install Rust from https://rustup.rs"
+    mkdir -p "$output_dir"
+
+    local built=""
+    if command -v rustup >/dev/null; then
+        rustup target list --installed | grep -qx "$relay_target" || rustup target add "$relay_target" || true
+        # ring's C parts need a musl compiler; clang can be one without installing musl
+        local cc=()
+        if ! command -v x86_64-linux-musl-gcc >/dev/null && command -v clang >/dev/null; then
+            cc=("CC_x86_64_unknown_linux_musl=clang")
+        fi
+        if (cd "$root" && env "${cc[@]}" cargo build --release -p lis-relay --target "$relay_target"); then
+            built="$root/target/$relay_target/release/lis-relay"
+        fi
+    fi
+    if [[ -z $built ]]; then
+        echo "No static build, so it needs a glibc as new as this PC's."
+        (cd "$root" && cargo build --release -p lis-relay)
+        built="$root/target/release/lis-relay"
+    fi
+
+    install -m755 "$built" "$output_dir/lis-relay"
+    cp "$root/relay/deploy/lis-relay.service" "$root/relay/deploy/config.toml" "$output_dir/"
+    echo "Relay: $output_dir/lis-relay, config.toml and lis-relay.service, for the server. See the README."
+}
+
 build_apk() {
     step "Building the APK"
     need cargo "Install Rust from https://rustup.rs"
@@ -174,6 +208,10 @@ fi
 
 if $do_apk; then
     build_apk
+fi
+
+if $do_relay; then
+    build_relay
 fi
 
 if $do_daemon; then

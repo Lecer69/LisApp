@@ -7,6 +7,7 @@ use bitrate::BitrateGovernor;
 use lis_core::identity::{write_private, Identity};
 use lis_core::names::safe_file_name;
 use lis_core::protocol::{self, FileOffer, MediaAction, Message};
+use lis_core::relay;
 use lis_core::session::{self, Command, Event, Handle, Handler, Local, Peer, Role, Timing};
 use lis_core::sync;
 use lis_core::tls;
@@ -96,6 +97,15 @@ pub struct PairedPc {
     pub name: String,
     pub host: String,
     pub port: u16,
+}
+
+/// The relay server the PC told this phone about.
+#[derive(uniffi::Record, Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelayInfo {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub password: String,
 }
 
 #[derive(uniffi::Record, Debug, Clone, PartialEq)]
@@ -190,6 +200,9 @@ pub trait ClientListener: Send + Sync {
     fn on_unlock_result(&self, ok: bool, reason: String);
     /// The PC asks for a photo, which only the running camera can take.
     fn on_snap_request(&self);
+    /// Whether the connection goes through the relay server, where files and the camera are off.
+    /// Also when the PC names another relay: read it again with `relay`.
+    fn on_route(&self, relayed: bool);
 }
 
 struct VideoLink {
@@ -235,6 +248,12 @@ struct State {
     task: Option<JoinHandle<()>>,
     connection_state: Option<ConnectionState>,
     video: Option<VideoLink>,
+    relay: Option<RelayInfo>,
+    /// Straight to the relay, as on mobile data, where the PC's address can't be reached.
+    prefer_relay: bool,
+    /// Off on the USB cable, which is meant to be the only way.
+    no_relay: bool,
+    relayed: bool,
 }
 
 struct Inner {
@@ -243,6 +262,7 @@ struct Inner {
     video_connector: TlsConnector,
     name: String,
     pc_path: PathBuf,
+    relay_path: PathBuf,
     sync_dir: PathBuf,
     listener: Box<dyn ClientListener>,
     state: Mutex<State>,
@@ -257,20 +277,26 @@ impl Inner {
         self.listener.on_state(new, pc_name);
     }
 
-    /// Reconnects for as long as the target stands, backing off while the PC can't be reached.
+    /// Reconnects for as long as the target stands, backing off while the PC can't be reached. Tries
+    /// the address first, then the relay, if the PC named one.
     async fn connection_loop(self: Arc<Self>, host: String, port: u16) {
         let mut delay = Duration::from_secs(1);
         loop {
             self.set_state(ConnectionState::Connecting, None);
-            match tls::connect(&self.connector, &host, port).await {
-                Ok((stream, peer)) => {
+            match self.open(&host, port).await {
+                Some((stream, peer, relayed)) => {
                     let paired_elsewhere = self.state.lock().unwrap().pc.as_ref().is_some_and(|pc| pc.fingerprint != peer);
                     if paired_elsewhere {
                         // Not the paired PC, whatever it calls itself: nothing is said to it
                         self.set_state(ConnectionState::WrongPc, None);
                     } else {
                         let (handle, commands) = Handle::channel();
-                        self.state.lock().unwrap().handle = Some(handle);
+                        {
+                            let mut state = self.state.lock().unwrap();
+                            state.handle = Some(handle);
+                            state.relayed = relayed;
+                        }
+                        self.listener.on_route(relayed);
                         let local = Local {
                             name: self.name.clone(),
                             fingerprint: self.identity.fingerprint(),
@@ -279,12 +305,17 @@ impl Inner {
                         };
                         let handler: Arc<dyn Handler> = self.clone();
                         let _ = session::run(stream, local, peer, handler, commands).await;
-                        self.state.lock().unwrap().handle = None;
+                        {
+                            let mut state = self.state.lock().unwrap();
+                            state.handle = None;
+                            state.relayed = false;
+                        }
+                        self.listener.on_route(false);
                         delay = Duration::from_secs(1);
                         self.set_state(ConnectionState::Disconnected, None);
                     }
                 }
-                Err(_) => self.set_state(ConnectionState::Disconnected, None),
+                None => self.set_state(ConnectionState::Disconnected, None),
             }
 
             tokio::select! {
@@ -292,6 +323,50 @@ impl Inner {
                 _ = self.wake.notified() => delay = Duration::from_secs(1),
             }
             delay = (delay * 2).min(MAX_RETRY_DELAY);
+        }
+    }
+
+    /// The stream, the peer's fingerprint, and whether it's through the relay.
+    async fn open(&self, host: &str, port: u16) -> Option<(tokio_rustls::client::TlsStream<tokio::net::TcpStream>, String, bool)> {
+        let (relay, prefer_relay, pc) = {
+            let state = self.state.lock().unwrap();
+            let relay = state.relay.clone().filter(|_| !state.no_relay);
+            (relay, state.prefer_relay, state.pc.as_ref().map(|pc| pc.fingerprint.clone()))
+        };
+        // Only for a paired PC, as pairing happens only on the network or the cable
+        let relay = relay.zip(pc);
+        if !(prefer_relay && relay.is_some()) {
+            if let Ok((stream, peer)) = tls::connect(&self.connector, host, port).await {
+                return Some((stream, peer, false));
+            }
+        }
+        let (relay, pc) = relay?;
+        let tcp = relay::dial(&relay.host, relay.port, &relay.password, &pc).await.ok()?;
+        let (stream, peer) = tls::connect_over(&self.connector, tcp).await.ok()?;
+        Some((stream, peer, true))
+    }
+
+    fn set_relay(&self, info: Option<RelayInfo>) {
+        let mut state = self.state.lock().unwrap();
+        if state.relay == info {
+            return;
+        }
+        state.relay = info.clone();
+        let relayed = state.relayed;
+        drop(state);
+        self.listener.on_route(relayed);
+        match info {
+            Some(info) => match serde_json::to_vec(&info) {
+                Ok(bytes) => {
+                    if let Err(error) = write_private(&self.relay_path, &bytes) {
+                        eprintln!("lis: can't save the relay: {error}");
+                    }
+                }
+                Err(error) => eprintln!("lis: can't encode the relay: {error}"),
+            },
+            None => {
+                let _ = fs::remove_file(&self.relay_path);
+            }
         }
     }
 
@@ -337,6 +412,9 @@ impl Inner {
             return VideoEnd::Refused("Not paired with a PC".to_string());
         };
         let Some((host, port)) = target else { return VideoEnd::Retry };
+        if self.state.lock().unwrap().relayed {
+            return VideoEnd::Refused("The camera doesn't go through the relay".to_string());
+        }
 
         let Ok((stream, peer)) = tls::connect(&self.video_connector, &host, port).await else {
             return VideoEnd::Retry;
@@ -389,6 +467,9 @@ impl Inner {
     fn remember_address(&self) {
         let mut state = self.state.lock().unwrap();
         let Some((host, port)) = state.target.clone() else { return };
+        if state.relayed {
+            return;
+        }
         if let Some(pc) = &mut state.pc {
             if is_loopback(&host) && !is_loopback(&pc.host) {
                 return;
@@ -514,7 +595,9 @@ impl Handler for Inner {
         let mut state = self.state.lock().unwrap();
         if state.pc.as_ref().is_some_and(|pc| pc.fingerprint == fingerprint) {
             state.pc = None;
+            state.relay = None;
             let _ = fs::remove_file(&self.pc_path);
+            let _ = fs::remove_file(&self.relay_path);
         }
         let video = state.video.take();
         drop(state);
@@ -527,6 +610,9 @@ impl Handler for Inner {
     }
 
     fn open_incoming(&self, _peer: &Peer, offer: &FileOffer) -> Option<File> {
+        if self.state.lock().unwrap().relayed {
+            return None;
+        }
         let fd = self.listener.open_incoming_file(offer.id, safe_file_name(&offer.name), offer.size);
         // The listener handed this descriptor over, so it's ours to close
         (fd >= 0).then(|| unsafe { File::from_raw_fd(fd) })
@@ -588,6 +674,10 @@ impl Inner {
             Message::UnlockChallenge { nonce } => self.listener.on_unlock_challenge(nonce),
             Message::UnlockResult { ok, reason } => self.listener.on_unlock_result(ok, reason),
             Message::SnapRequest => self.listener.on_snap_request(),
+            Message::RelayInfo { host, port, password } => {
+                let info = (!host.is_empty() && port != 0).then_some(RelayInfo { host, port, password });
+                self.set_relay(info);
+            }
             _ => {}
         }
     }
@@ -634,6 +724,7 @@ impl LisClient {
         let video_connector = tls::video_connector(&identity).map_err(failed)?;
         let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().map_err(failed)?;
         let pc_path = dir.join("pc.json");
+        let relay_path = dir.join("relay.json");
         let sync_dir = dir.join("sync");
         let docs = sync::KINDS
             .iter()
@@ -642,13 +733,15 @@ impl LisClient {
                 Some(((*kind).to_string(), serde_json::from_slice(&bytes).ok()?))
             })
             .collect();
-        let state = State { pc: load_pc(&pc_path), ..Default::default() };
+        let relay = fs::read(&relay_path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        let state = State { pc: load_pc(&pc_path), relay, ..Default::default() };
         let inner = Arc::new(Inner {
             identity,
             connector,
             video_connector,
             name: device_name,
             pc_path,
+            relay_path,
             sync_dir,
             listener,
             state: Mutex::new(state),
@@ -667,10 +760,33 @@ impl LisClient {
         self.inner.identity.fingerprint()
     }
 
+    /// The relay the PC named, if any. The password isn't given out.
+    pub fn relay(&self) -> Option<RelayInfo> {
+        self.inner.state.lock().unwrap().relay.clone().map(|relay| RelayInfo { password: String::new(), ..relay })
+    }
+
+    pub fn is_relayed(&self) -> bool {
+        self.inner.state.lock().unwrap().relayed
+    }
+
+    /// `prefer` goes to the relay without trying the PC's address first, as on mobile data. `allowed`
+    /// is off on the USB cable.
+    pub fn set_relay_mode(&self, allowed: bool, prefer: bool) {
+        let mut state = self.inner.state.lock().unwrap();
+        if state.prefer_relay != prefer || state.no_relay == allowed {
+            state.prefer_relay = prefer;
+            state.no_relay = !allowed;
+            drop(state);
+            self.inner.wake.notify_one();
+        }
+    }
+
     /// Replaces any current target. Connecting to the same address again only retries sooner.
     pub fn connect(&self, host: String, port: u16) {
         let mut state = self.inner.state.lock().unwrap();
-        if state.target.as_ref() == Some(&(host.clone(), port)) && state.task.as_ref().is_some_and(|task| !task.is_finished()) {
+        let running = state.task.as_ref().is_some_and(|task| !task.is_finished());
+        // Through the relay, the PC showing up nearby is a reason to go straight to it
+        if state.target.as_ref() == Some(&(host.clone(), port)) && running && !state.relayed {
             drop(state);
             self.inner.wake.notify_one();
             return;
@@ -679,6 +795,7 @@ impl LisClient {
             task.abort();
         }
         state.handle = None;
+        state.relayed = false;
         state.target = Some((host.clone(), port));
         let inner = self.inner.clone();
         state.task = Some(self.runtime.spawn(inner.connection_loop(host, port)));
@@ -748,6 +865,9 @@ impl LisClient {
         let mut state = self.inner.state.lock().unwrap();
         if state.pc.is_none() {
             return Err(failed("Not paired with a PC"));
+        }
+        if state.relayed {
+            return Err(failed("The camera doesn't go through the relay"));
         }
         if let Some(video) = state.video.take() {
             video.task.abort();
@@ -878,6 +998,9 @@ impl LisClient {
             return Err(failed("Can't read that file"));
         }
         let file = unsafe { File::from_raw_fd(fd) };
+        if self.is_relayed() {
+            return Err(failed("Files don't go through the relay"));
+        }
         let size = if size > 0 { size } else { file.metadata().map_err(failed)?.len() };
         let handle = self.handle().ok_or_else(|| failed("Not connected to the PC"))?;
         self.runtime.spawn(async move { handle.send(Command::SendFile { file, name, size, snap }).await });

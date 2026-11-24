@@ -3,6 +3,7 @@
 use crate::actions::{self, Action, Actions};
 use crate::camera::Camera;
 use crate::media::Media;
+use crate::relay::RelaySettings;
 use crate::snap;
 use crate::stats::{hostname, Sampler};
 use crate::sync::{Applied, SyncStore};
@@ -17,7 +18,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::process::Command as Process;
 use tokio::sync::{broadcast, mpsc, Notify};
@@ -61,6 +62,15 @@ struct Link {
     handle: Handle,
     generation: u64,
     paired: bool,
+    /// Through the relay server, where files, the camera and photos are off.
+    relayed: bool,
+}
+
+#[derive(Default)]
+struct RelayStatus {
+    settings: RelaySettings,
+    state: &'static str,
+    error: String,
 }
 
 struct PairCode {
@@ -169,6 +179,7 @@ struct State {
     locked_from_phone: Option<Instant>,
     usb: UsbState,
     snap: SnapSettings,
+    relay: RelayStatus,
 }
 
 pub struct Daemon {
@@ -188,6 +199,7 @@ pub struct Daemon {
     events: broadcast::Sender<String>,
     /// One queue, so messages to a phone arrive in the order they were made.
     outbox: mpsc::UnboundedSender<(Handle, Message)>,
+    relay_changed: Arc<Notify>,
 }
 
 fn now_ms() -> i64 {
@@ -251,6 +263,7 @@ impl Daemon {
             state: Mutex::new(State { trusted, ..Default::default() }),
             events,
             outbox,
+            relay_changed: Arc::new(Notify::new()),
         }
     }
 
@@ -313,6 +326,7 @@ impl Daemon {
                     "fingerprint": phone.fingerprint,
                     "name": phone.name,
                     "connected": state.links.get(&phone.fingerprint).is_some_and(|link| link.paired),
+                    "relayed": state.links.get(&phone.fingerprint).is_some_and(|link| link.paired && link.relayed),
                     "stats": state.stats.get(&phone.fingerprint),
                     "ringing": state.ringing.get(&phone.fingerprint).copied().unwrap_or(false),
                     "unlock": if state.pending_unlock.contains_key(&phone.fingerprint) {
@@ -334,6 +348,12 @@ impl Daemon {
             "phones": phones,
             "camera": self.camera.status(),
             "usb": { "enabled": state.usb.enabled, "forwarding": state.usb.forwarding },
+            "relay": {
+                "state": if state.relay.state.is_empty() { "off" } else { state.relay.state },
+                "error": state.relay.error,
+                "host": state.relay.settings.host,
+                "port": state.relay.settings.port,
+            },
             "snap": { "folder": self.snap_folder(&state).display().to_string(), "clipboard": state.snap.clipboard },
             "lock": { "locked": state.lock.locked, "password_required": state.lock.password_required, "blocked": state.lock.blocked },
             "actions": self.actions.list(),
@@ -353,11 +373,11 @@ impl Daemon {
     }
 
     /// A phone's newest connection replaces its older one.
-    pub fn register(&self, fingerprint: &str, handle: Handle) -> u64 {
+    pub fn register(&self, fingerprint: &str, handle: Handle, relayed: bool) -> u64 {
         let mut state = self.state.lock().unwrap();
         state.next_generation += 1;
         let generation = state.next_generation;
-        let old = state.links.insert(fingerprint.to_string(), Link { handle, generation, paired: false });
+        let old = state.links.insert(fingerprint.to_string(), Link { handle, generation, paired: false, relayed });
         drop(state);
         if let Some(old) = old {
             tokio::spawn(async move { old.handle.send(Command::Close).await });
@@ -443,6 +463,9 @@ impl Daemon {
             let state = self.state.lock().unwrap();
             let phone = self.pick_phone(&state, fingerprint).ok_or("No paired phone")?;
             let link = state.links.get(&phone).filter(|link| link.paired).ok_or("The phone isn't connected")?;
+            if link.relayed {
+                return Err("Files don't go through the relay".to_string());
+            }
             let name = Path::new(path).file_name().and_then(|name| name.to_str()).ok_or("Not a file")?;
             (link.handle.clone(), name.to_string())
         };
@@ -478,6 +501,9 @@ impl Daemon {
         let phone = self.camera.live_phone().ok_or("The phone's camera isn't on")?;
         let state = self.state.lock().unwrap();
         let link = state.links.get(&phone).filter(|link| link.paired).ok_or("The phone isn't connected")?;
+        if link.relayed {
+            return Err("Photos don't go through the relay".to_string());
+        }
         let _ = self.outbox.send((link.handle.clone(), Message::SnapRequest));
         Ok(())
     }
@@ -599,6 +625,49 @@ impl Daemon {
             .kill_on_drop(true)
             .status();
         matches!(tokio::time::timeout(ADB_LIMIT, status).await, Ok(Ok(status)) if status.success())
+    }
+
+    pub fn relay_settings(&self) -> RelaySettings {
+        self.state.lock().unwrap().relay.settings.clone()
+    }
+
+    pub fn relay_changed(&self) -> Arc<Notify> {
+        self.relay_changed.clone()
+    }
+
+    /// The phones learn it from here, so it's only typed in once. Empty when there's none.
+    fn relay_message(&self) -> Message {
+        let settings = self.relay_settings();
+        if settings.is_set() {
+            Message::RelayInfo { host: settings.host, port: settings.port, password: settings.password }
+        } else {
+            Message::RelayInfo { host: String::new(), port: 0, password: String::new() }
+        }
+    }
+
+    pub fn set_relay(&self, settings: RelaySettings) {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.relay.settings == settings {
+                return;
+            }
+            state.relay.settings = settings;
+        }
+        self.relay_changed.notify_one();
+        self.broadcast(self.relay_message());
+        self.publish_status();
+    }
+
+    pub fn set_relay_state(&self, relay_state: &'static str, error: &str) {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.relay.state == relay_state && state.relay.error == error {
+                return;
+            }
+            state.relay.state = relay_state;
+            state.relay.error = error.to_string();
+        }
+        self.publish_status();
     }
 
     fn unlock_message(&self, state: &State, fingerprint: &str) -> Message {
@@ -798,6 +867,7 @@ impl Daemon {
                 self.send_to(&peer.fingerprint, message);
             }
             self.send_to(&peer.fingerprint, unlock_state);
+            self.send_to(&peer.fingerprint, self.relay_message());
             self.media.wake().notify_one();
         }
         self.publish_status();
@@ -915,6 +985,9 @@ impl Handler for Daemon {
     }
 
     fn open_incoming(&self, peer: &Peer, offer: &FileOffer) -> Option<fs::File> {
+        if self.state.lock().unwrap().links.get(&peer.fingerprint).is_some_and(|link| link.relayed) {
+            return None;
+        }
         let name = safe_file_name(&offer.name);
         let dir = if offer.snap { self.snap_folder(&self.state.lock().unwrap()) } else { self.paths.downloads.clone() };
         match reserve(&dir, &name) {

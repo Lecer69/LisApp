@@ -35,6 +35,7 @@ enum Heard {
     UnlockChallenge(String),
     UnlockResult(bool, String),
     SnapRequest,
+    Route(bool),
 }
 
 #[derive(Clone)]
@@ -104,6 +105,9 @@ impl ClientListener for Listener {
     }
     fn on_snap_request(&self) {
         self.heard.lock().unwrap().push(Heard::SnapRequest);
+    }
+    fn on_route(&self, relayed: bool) {
+        self.heard.lock().unwrap().push(Heard::Route(relayed));
     }
 }
 
@@ -1577,4 +1581,126 @@ mod unlocking {
         app.client.unlock_respond(nonce, signature);
         assert!(result(&app).0);
     }
+}
+
+const RELAY_PASSWORD: &str = "relay-test-password";
+
+/// A relay on a free port, in this process.
+fn start_relay(rt: &Runtime) -> u16 {
+    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    rt.spawn(lis_relay::run(listener, lis_relay::config::Settings::with_password(RELAY_PASSWORD)));
+    port
+}
+
+fn use_relay(rt: &Runtime, pc: &Pc, port: u16, password: &str) {
+    rt.block_on(pc.ok(json!({ "cmd": "relay_settings", "host": "127.0.0.1", "port": port, "password": password })));
+}
+
+/// Paired on the network, then the PC's address stops answering, as away from home.
+fn paired_then_away(rt: &Runtime, pc: &Pc, relay_port: u16) -> App {
+    use_relay(rt, pc, relay_port, RELAY_PASSWORD);
+    rt.block_on(pc.until("the PC on the relay", |status| status["relay"]["state"] == json!("on")));
+    let app = App::new();
+    app.pair(rt, pc);
+    let start = Instant::now();
+    while app.client.relay().is_none() {
+        assert!(start.elapsed() < Duration::from_secs(10), "the PC never named its relay");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    app.clear();
+    app.client.connect("127.0.0.1".into(), common::free_port());
+    app
+}
+
+#[test]
+fn away_from_home_the_phone_goes_through_the_relay() {
+    let (rt, pc) = start();
+    let relay_port = start_relay(&rt);
+    let app = paired_then_away(&rt, &pc, relay_port);
+
+    let relay = app.client.relay().unwrap();
+    assert_eq!((relay.host.as_str(), relay.port, relay.password.as_str()), ("127.0.0.1", relay_port, ""), "the password stays inside");
+    app.state(ConnectionState::Connected);
+    app.wait("the relayed route", |heard| *heard == Heard::Route(true));
+    assert!(app.client.is_relayed());
+    rt.block_on(pc.until("relayed on the PC", |status| status["phones"][0]["relayed"] == json!(true)));
+
+    // Everyday things still work
+    app.client.lock_pc();
+    rt.block_on(pc.log_until("hyprctl", "quickshell:lock"));
+    app.client.send_stats(stats());
+    rt.block_on(pc.until("stats", |status| status["phones"][0]["stats"]["battery_percent"] == json!(55)));
+
+    // Files, the camera and photos don't
+    let source = app.received.path().join("big.bin");
+    std::fs::write(&source, b"data").unwrap();
+    let fd = std::fs::File::open(&source).unwrap().into_raw_fd();
+    assert!(app.client.send_file(fd, "big.bin".into(), 0).is_err());
+    assert!(app.client.start_video(camera_config()).is_err());
+    let reply = rt.block_on(pc.request(json!({ "cmd": "send_file", "path": source.to_str().unwrap() })));
+    assert_eq!(reply["ok"], json!(false), "{reply}");
+}
+
+#[test]
+fn a_relaunched_phone_still_knows_the_relay() {
+    let (rt, pc) = start();
+    let relay_port = start_relay(&rt);
+    let mut app = paired_then_away(&rt, &pc, relay_port);
+    app.state(ConnectionState::Connected);
+
+    app.relaunch();
+    app.client.connect("127.0.0.1".into(), common::free_port());
+    app.state(ConnectionState::Connected);
+    assert!(app.client.is_relayed());
+}
+
+#[test]
+fn a_wrong_relay_password_lets_nobody_through() {
+    let (rt, pc) = start();
+    let relay_port = start_relay(&rt);
+    use_relay(&rt, &pc, relay_port, "not-the-password");
+    let status = rt.block_on(pc.until("the refusal", |status| status["relay"]["state"] == json!("error")));
+    assert_eq!(status["relay"]["error"], json!("wrong relay password"));
+}
+
+#[test]
+fn an_unpaired_phone_cant_pair_through_the_relay() {
+    let (rt, pc) = start();
+    let relay_port = start_relay(&rt);
+    use_relay(&rt, &pc, relay_port, RELAY_PASSWORD);
+    rt.block_on(pc.until("the PC on the relay", |status| status["relay"]["state"] == json!("on")));
+    rt.block_on(pc.ok(json!({ "cmd": "pair_open" })));
+
+    let fingerprint = rt.block_on(pc.status())["fingerprint"].as_str().unwrap().to_string();
+    let stranger = Identity::generate().unwrap();
+    let connector = tls::connector(&stranger).unwrap();
+    rt.block_on(async {
+        let tcp = lis_core::relay::dial("127.0.0.1", relay_port, RELAY_PASSWORD, &fingerprint).await.unwrap();
+        // The PC hangs up before a hello, so nothing reaches pairing
+        let closed = match tls::connect_over(&connector, tcp).await {
+            Err(_) => true,
+            Ok((mut stream, _)) => {
+                use tokio::io::AsyncReadExt;
+                let mut byte = [0u8; 1];
+                matches!(tokio::time::timeout(Duration::from_secs(5), stream.read(&mut byte)).await, Ok(Ok(0)) | Ok(Err(_)))
+            }
+        };
+        assert!(closed);
+    });
+    assert!(rt.block_on(pc.status())["pair_code"].is_null());
+}
+
+#[test]
+fn back_home_the_phone_leaves_the_relay() {
+    let (rt, pc) = start();
+    let relay_port = start_relay(&rt);
+    let app = paired_then_away(&rt, &pc, relay_port);
+    app.state(ConnectionState::Connected);
+    app.clear();
+
+    app.client.connect("127.0.0.1".into(), pc.port);
+    app.wait("the direct route", |heard| *heard == Heard::Route(false));
+    app.state(ConnectionState::Connected);
+    assert!(!app.client.is_relayed());
 }

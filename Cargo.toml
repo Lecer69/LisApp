@@ -1,7 +1,7 @@
 [workspace]
-members = ["video", "core", "daemon", "ffi", "obs-plugin"]
+members = ["video", "core", "daemon", "ffi", "relay", "obs-plugin"]
 # The plugin needs OBS's headers, so it's only built when asked for: cargo build -p lis-camera
-default-members = ["video", "core", "daemon", "ffi"]
+default-members = ["video", "core", "daemon", "ffi", "relay"]
 resolver = "2"
 
 [workspace.package]

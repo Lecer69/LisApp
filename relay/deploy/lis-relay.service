@@ -1,0 +1,33 @@
+[Unit]
+Description=Lis App relay server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Settings are in /etc/lis-relay/config.toml; check it with: lis-relay --check
+ExecStartPre=/usr/local/bin/lis-relay --check --config ${CREDENTIALS_DIRECTORY}/config.toml
+ExecStart=/usr/local/bin/lis-relay --config ${CREDENTIALS_DIRECTORY}/config.toml
+# Holds the password, so it stays readable only by root; systemd hands the service a copy
+LoadCredential=config.toml:/etc/lis-relay/config.toml
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# Under 1024 needs this, as in port = 443
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+LimitNOFILE=8192
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

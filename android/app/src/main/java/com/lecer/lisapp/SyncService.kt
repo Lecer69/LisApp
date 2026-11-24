@@ -89,9 +89,12 @@ class SyncService : Service() {
         ContextCompat.registerReceiver(this, chargingReceiver, power, ContextCompat.RECEIVER_NOT_EXPORTED)
 
         scope.launch {
-            Lis.state.map { Triple(it.connection, it.pcName, it.paused) }.distinctUntilChanged().collect { (connection, name, paused) ->
-                Notifications.showService(this@SyncService, statusText(connection, name, paused))
-                if (connection == ConnectionState.CONNECTED || paused) discovery.stop() else discovery.start()
+            Lis.state.map { listOf(it.connection, it.pcName, it.paused, it.relayed) }.distinctUntilChanged().collect {
+                val state = Lis.state.value
+                Notifications.showService(this@SyncService, statusText(state.connection, state.pcName, state.paused))
+                // Through the relay, it keeps looking, to go straight to the PC once it's nearby
+                val direct = state.connection == ConnectionState.CONNECTED && !state.relayed
+                if (direct || state.paused) discovery.stop() else discovery.start()
             }
         }
         scope.launch {
@@ -136,7 +139,8 @@ class SyncService : Service() {
     private fun onFound(found: List<FoundPc>) {
         Lis.update { copy(found = found) }
         val paired = Lis.client.pairedPc() ?: return
-        if (Lis.state.value.connection == ConnectionState.CONNECTED || Lis.state.value.usbMode) return
+        val state = Lis.state.value
+        if ((state.connection == ConnectionState.CONNECTED && !state.relayed) || state.usbMode) return
         // The PC's address can change; its certificate doesn't
         found.firstOrNull { paired.fingerprint.startsWith(it.fingerprintStart) }?.let { pc ->
             Lis.client.connect(pc.host, pc.port.toUShort())
@@ -176,7 +180,7 @@ class SyncService : Service() {
         }
 
         private fun statusText(connection: ConnectionState, name: String?): String = when (connection) {
-            ConnectionState.CONNECTED -> "Connected to ${name ?: "your PC"}"
+            ConnectionState.CONNECTED -> if (Lis.state.value.relayed) "Connected to ${name ?: "your PC"} through the relay" else "Connected to ${name ?: "your PC"}"
             ConnectionState.CONNECTING -> "Connecting…"
             ConnectionState.UNPAIRED -> "Not paired"
             ConnectionState.WRONG_PC -> "Another device answered instead of your PC"

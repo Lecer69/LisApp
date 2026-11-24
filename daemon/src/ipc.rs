@@ -129,6 +129,16 @@ async fn run(request: &Value, daemon: &Daemon) -> Result<Value, String> {
             daemon.set_usb(request.get("enabled").and_then(Value::as_bool).ok_or("No answer")?).await;
             Ok(Value::Null)
         }
+        "relay_settings" => {
+            let port = request.get("port").and_then(Value::as_u64).unwrap_or(0);
+            let settings = crate::relay::RelaySettings {
+                host: text("host").unwrap_or("").trim().to_string(),
+                port: u16::try_from(port).map_err(|_| "Not a port".to_string())?,
+                password: text("password").unwrap_or("").to_string(),
+            };
+            daemon.set_relay(settings);
+            Ok(Value::Null)
+        }
         "actions_set" => {
             let actions = request.get("actions").cloned().ok_or("No actions")?;
             let actions = serde_json::from_value(actions).map_err(|_| "Not a list of actions".to_string())?;

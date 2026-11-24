@@ -4,6 +4,7 @@ pub mod identity;
 pub mod names;
 pub mod pairing;
 pub mod protocol;
+pub mod relay;
 pub mod session;
 pub mod sync;
 pub mod tls;

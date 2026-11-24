@@ -6,6 +6,7 @@ mod daemon;
 mod ipc;
 mod media;
 mod obs;
+mod relay;
 mod snap;
 mod stats;
 mod sync;
@@ -70,33 +71,41 @@ async fn listen(port: u16) -> std::io::Result<TcpListener> {
 async fn accept_phones(listener: TcpListener, daemon: Arc<Daemon>) -> anyhow::Result<()> {
     let acceptor = tls::acceptor(&daemon.identity)?;
     let limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
-    let fingerprint = daemon.identity.fingerprint();
 
     loop {
         let (tcp, _) = listener.accept().await?;
         let Ok(permit) = limit.clone().try_acquire_owned() else { continue };
-        let (acceptor, daemon, fingerprint) = (acceptor.clone(), daemon.clone(), fingerprint.clone());
-
+        let (acceptor, daemon) = (acceptor.clone(), daemon.clone());
         tokio::spawn(async move {
             let _permit = permit;
-            let Ok((stream, peer)) = tls::accept(&acceptor, tcp).await else { return };
-            if tls::client_is_video(&stream) {
-                // Never a way in: only a phone that's already paired can send video
-                if let Some(name) = daemon.phone_name(&peer) {
-                    camera::serve_phone(stream, peer, name, daemon.clone()).await;
-                }
-                return;
-            }
-            let (handle, commands) = Handle::channel();
-            let generation = daemon.register(&peer, handle);
-            let local = Local { name: daemon.name.clone(), fingerprint, role: Role::Server, timing: Timing::default() };
-            let result = session::run(stream, local, peer.clone(), daemon.clone(), commands).await;
-            if let Err(lis_core::session::SessionError::Protocol(what)) = &result {
-                eprintln!("lis-daemon: dropped a connection: {what}");
-            }
-            daemon.unregister(&peer, generation);
+            serve_phone(tcp, &acceptor, daemon, false).await;
         });
     }
+}
+
+/// One connection from a phone, straight or through the relay.
+pub async fn serve_phone(tcp: tokio::net::TcpStream, acceptor: &tokio_rustls::TlsAcceptor, daemon: Arc<Daemon>, relayed: bool) {
+    let Ok((stream, peer)) = tls::accept(acceptor, tcp).await else { return };
+    // Pairing happens only on the network or the cable
+    if relayed && !lis_core::session::Handler::is_trusted(&*daemon, &peer) {
+        return;
+    }
+    if tls::client_is_video(&stream) {
+        // Never a way in: only a phone that's already paired can send video, and not through the relay
+        if let (Some(name), false) = (daemon.phone_name(&peer), relayed) {
+            camera::serve_phone(stream, peer, name, daemon.clone()).await;
+        }
+        return;
+    }
+    let (handle, commands) = Handle::channel();
+    let generation = daemon.register(&peer, handle, relayed);
+    let fingerprint = daemon.identity.fingerprint();
+    let local = Local { name: daemon.name.clone(), fingerprint, role: Role::Server, timing: Timing::default() };
+    let result = session::run(stream, local, peer.clone(), daemon.clone(), commands).await;
+    if let Err(lis_core::session::SessionError::Protocol(what)) = &result {
+        eprintln!("lis-daemon: dropped a connection: {what}");
+    }
+    daemon.unregister(&peer, generation);
 }
 
 async fn run() -> anyhow::Result<()> {
@@ -165,6 +174,7 @@ async fn run() -> anyhow::Result<()> {
             }
         });
     }
+    tokio::spawn(relay::run(daemon.clone()));
     let phones = tokio::spawn(accept_phones(listener, daemon.clone()));
     let stats = {
         let daemon = daemon.clone();

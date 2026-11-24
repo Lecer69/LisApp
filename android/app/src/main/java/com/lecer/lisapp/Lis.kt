@@ -41,6 +41,10 @@ data class AppState(
     /** This phone has made its unlock key. Whether the PC approved it shows in `unlockAvailable`. */
     val unlockKey: Boolean = false,
     val unlockMessage: String? = null,
+    /** Through the relay server, where files and the camera are off. */
+    val relayed: Boolean = false,
+    /** The PC named a relay server, so Wi-Fi being off doesn't pause anything. */
+    val hasRelay: Boolean = false,
 )
 
 /** The one client for the process, and the state the screens and the service read. */
@@ -79,6 +83,7 @@ object Lis {
         client = LisClient(appContext.filesDir.absolutePath, deviceName(appContext), Listener())
         val usb = appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).getBoolean(PREFERENCE_USB, false)
         update { copy(usbMode = usb, unlockKey = Unlocker.hasKey(), camera = camera.copy(front = Prefs.current.cameraFront)) }
+        refreshRelay()
         refreshPaired()
         SyncDocs.reloadAll()
     }
@@ -93,18 +98,27 @@ object Lis {
     fun setUsbMode(on: Boolean) {
         appContext.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE).edit().putBoolean(PREFERENCE_USB, on).apply()
         update { copy(usbMode = on) }
+        refreshRelay()
         refreshPause()
         connectToPc()
     }
 
     fun setWifi(on: Boolean) {
         update { copy(wifiOff = !on) }
+        refreshRelay()
         refreshPause()
+    }
+
+    /** Off Wi-Fi, the PC's address can't answer, so the relay goes first. Never on the cable. */
+    fun refreshRelay() {
+        val current = state.value
+        update { copy(hasRelay = client.relay() != null) }
+        client.setRelayMode(!current.usbMode, current.wifiOff)
     }
 
     fun refreshPause() {
         val current = state.value
-        val paused = !current.usbMode && current.wifiOff && Prefs.current.pauseWithoutWifi
+        val paused = !current.usbMode && current.wifiOff && !current.hasRelay && Prefs.current.pauseWithoutWifi
         if (paused == current.paused) return
         update { copy(paused = paused) }
         if (paused) client.disconnect() else connectToPc()
@@ -145,6 +159,7 @@ object Lis {
         refreshPaired()
         update { copy(pcStats = null, pcName = null) }
         SyncDocs.clear()
+        refreshRelay()
     }
 
     private const val PREFERENCE_PC_BOOT = "pc_boot_at"
@@ -178,6 +193,8 @@ object Lis {
             refreshPaired()
             if (state == ConnectionState.UNPAIRED && wantsPairing) startPairing()
             if (state == ConnectionState.CONNECTED) {
+                refreshRelay()
+                refreshPause()
                 checkedBoot = false
                 EventLog.add(EventKind.CONNECTED, "Connected to ${pcLabel()}")
                 StatsReporter.sendNow(appContext)
@@ -291,6 +308,12 @@ object Lis {
 
         override fun onSnapRequest() {
             onSnapRequest?.invoke()
+        }
+
+        override fun onRoute(relayed: Boolean) {
+            update { copy(relayed = relayed) }
+            // The PC only names its relay once connected, so this is when it's known
+            refreshRelay()
         }
     }
 }

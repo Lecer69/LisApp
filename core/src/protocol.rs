@@ -123,6 +123,8 @@ pub enum Message {
     UnlockChallenge { nonce: String },
     UnlockResponse { nonce: String, signature: String },
     UnlockResult { ok: bool, reason: String },
+    /// The relay server for when the phone can't reach the PC directly; an empty host for none.
+    RelayInfo { host: String, port: u16, password: String },
     /// From a newer version of the other device. Ignored, so it doesn't end the connection.
     #[serde(other)]
     Unknown,

@@ -1,0 +1,65 @@
+# lis-relay's settings. Every key can be left out for its default; only the password is needed.
+# After a change: sudo systemctl restart lis-relay. The devices reconnect by themselves.
+# Check a file without starting: lis-relay --check --config /etc/lis-relay/config.toml
+
+[server]
+# Where it listens. "::" is every address, IPv4 too on most systems; "0.0.0.0" for IPv4 only.
+address = "::"
+port = 47421
+# "quiet" (errors only), "info" (PCs, tunnels, bans) or "debug" (every refused request).
+log = "info"
+
+[auth]
+# Shared with each PC: the shell's Settings, Phone Sync, Relay Server. 8 characters or more.
+# Make one with: head -c 24 /dev/urandom | base64
+password = ""
+# Or read it from a file, which wins over `password`.
+# password_file = "/etc/lis-relay/password"
+
+# A wrong password or a bad request waits this long for its answer, to slow down guessing.
+failure_delay_ms = 2000
+# This many failures from one address within failure_window_minutes bans it for ban_minutes.
+# 0 turns banning off.
+max_failures = 10
+failure_window_minutes = 10
+ban_minutes = 30
+
+[limits]
+# Open connections of any kind, and from one address.
+max_connections = 512
+max_connections_per_ip = 32
+# PCs waiting on the relay at once.
+max_pcs = 64
+# Phones connected through it at once, in all and to one PC.
+max_tunnels = 128
+max_tunnels_per_pc = 4
+
+# Speed of each tunnel, each way, in KiB/s. Plenty for stats, sync, media and unlocking. 0 for no limit.
+tunnel_kbps = 512
+# All tunnels together, each way, in KiB/s. 0 for no limit.
+total_kbps = 0
+# Data through one PC's tunnels per day (UTC), both ways, in MiB. Past it, its phones are turned
+# away until midnight. Counted since the relay started. 0 for no limit.
+daily_mb_per_pc = 500
+# A tunnel ends after this many hours, and the phone connects again. 0 for no limit.
+max_tunnel_hours = 0
+
+[timeouts]
+# For a client to send its request after connecting.
+request_secs = 10
+# For a PC to answer a phone.
+answer_secs = 15
+# Silence that ends a tunnel. The devices ping every 25 s, so it has to be 30 or more.
+idle_secs = 120
+# How often waiting PCs hear from the relay. Under 75, or they think it's gone.
+listener_ping_secs = 30
+
+[access]
+# Only these PCs may wait on the relay or be called through it, by fingerprint. The shell shows its
+# own in Settings, Phone Sync, Relay Server. Empty for any PC that has the password.
+allow_pcs = []
+# Addresses or ranges that may connect, like "203.0.113.0/24" or "2001:db8::/32". Empty for any.
+# Phones on mobile data change address often, so this suits PCs more than phones.
+allow_ips = []
+# Never these. Wins over allow_ips.
+deny_ips = []

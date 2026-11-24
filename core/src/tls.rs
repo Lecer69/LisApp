@@ -177,6 +177,21 @@ pub async fn connect(
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))?
 }
 
+/// Over a connection that's already open, such as a relay's tunnel.
+pub async fn connect_over(
+    connector: &TlsConnector,
+    tcp: TcpStream,
+) -> io::Result<(client::TlsStream<TcpStream>, String)> {
+    timeout(HANDSHAKE_TIMEOUT, async {
+        let name = ServerName::try_from("lis-app").map_err(io::Error::other)?;
+        let stream = connector.connect(name, tcp).await?;
+        let peer = peer_fingerprint(stream.get_ref().1.peer_certificates())?;
+        Ok((stream, peer))
+    })
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connection timed out"))?
+}
+
 /// Returns the stream and the client's fingerprint.
 pub async fn accept(
     acceptor: &TlsAcceptor,

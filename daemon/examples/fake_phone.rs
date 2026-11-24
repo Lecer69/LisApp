@@ -60,6 +60,9 @@ impl ClientListener for Listener {
     fn on_unlock_result(&self, ok: bool, reason: String) {
         println!("unlock: {ok} {reason}");
     }
+    fn on_route(&self, relayed: bool) {
+        println!("route: {}", if relayed { "relay" } else { "direct" });
+    }
     fn on_snap_request(&self) {
         println!("snap requested");
         let Some(path) = SNAP_FILE.get() else { return };

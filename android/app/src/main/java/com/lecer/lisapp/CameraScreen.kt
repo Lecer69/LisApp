@@ -82,6 +82,7 @@ private fun statusText(state: AppState, wantedFps: Int): String {
     val note = fpsNote(camera, wantedFps)
     return when {
         camera.error != null -> camera.error
+        !camera.running && state.relayed -> "The camera doesn't go through the relay"
         !camera.running -> if (state.connection == ConnectionState.CONNECTED) "Stopped" else "Connect to your PC first"
         !camera.live -> "Connecting to the PC…"
         camera.viewers == 0 -> "Live. Add the Lis Camera source in OBS.$note"

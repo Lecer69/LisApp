@@ -99,7 +99,7 @@ fun SettingsScreen(state: AppState, settings: AppSettings, setup: SetupState, ac
             } else {
                 ToggleRow(
                     "Pause while Wi-Fi is off",
-                    "Saves battery. Turn it off if the PC uses this phone's hotspot.",
+                    if (state.hasRelay) "Not while the PC has a relay server: it goes through that instead" else "Saves battery. Turn it off if the PC uses this phone's hotspot.",
                     settings.pauseWithoutWifi,
                 ) { set { copy(pauseWithoutWifi = it) } }
             }
@@ -114,6 +114,11 @@ fun SettingsScreen(state: AppState, settings: AppSettings, setup: SetupState, ac
                 settings.startOnBoot && settings.keepConnected,
                 enabled = settings.keepConnected,
             ) { set { copy(startOnBoot = it) } }
+            SettingRow(
+                "Relay server",
+                Lis.client.relay()?.let { "${it.host}:${it.port}. For when the PC can't be reached here, set in the PC's Phone Sync settings. No files or camera through it." }
+                    ?: "None. Set one in the PC's Phone Sync settings to reach it away from home.",
+            )
             SettingRow("Reconnect now", shortStatus(state), onClick = actions.reconnect) {
                 LisButton("Reconnect", actions.reconnect)
             }
@@ -246,7 +251,7 @@ fun SettingsScreen(state: AppState, settings: AppSettings, setup: SetupState, ac
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 InfoRow("Name", pc.name)
-                InfoRow("Address", if (state.usbMode) "USB cable" else "${pc.host}:${pc.port}")
+                InfoRow("Address", if (state.usbMode) "USB cable" else if (state.relayed) "Relay server" else "${pc.host}:${pc.port}")
                 InfoRow("Status", shortStatus(state))
                 InfoRow("Fingerprint", shortFingerprint(pc.fingerprint))
             }

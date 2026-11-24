@@ -91,12 +91,14 @@ fun LisScreen(state: AppState, settings: AppSettings, setup: SetupState, actions
 }
 
 fun shortStatus(state: AppState): String = when (state.connection) {
-    ConnectionState.CONNECTED -> state.pcStats?.let { "Connected · up ${duration(it.uptimeSecs)}" } ?: "Connected"
+    ConnectionState.CONNECTED -> (if (state.relayed) "Through the relay" else "Connected") +
+        (state.pcStats?.let { " · up ${duration(it.uptimeSecs)}" } ?: "")
     ConnectionState.CONNECTING -> "Connecting…"
     ConnectionState.UNPAIRED, ConnectionState.WRONG_PC -> "Not connected"
     ConnectionState.DISCONNECTED -> when {
         state.usbMode -> "Waiting for the USB cable…"
         state.paused -> "Paused while Wi-Fi is off"
+        state.hasRelay -> "Looking for the PC, then the relay…"
         else -> "Looking for the PC…"
     }
 }
@@ -254,9 +256,10 @@ private fun HomeScreen(state: AppState, settings: AppSettings, setup: SetupState
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             Tile(R.drawable.ic_lock, "Lock PC", lock, modifier = Modifier.weight(1f), enabled = connected)
-            Tile(R.drawable.ic_upload, "Send File", actions.sendFile, modifier = Modifier.weight(1f), enabled = connected)
-            Tile(R.drawable.ic_camera, "Camera", actions.openCamera, modifier = Modifier.weight(1f), enabled = connected)
+            Tile(R.drawable.ic_upload, "Send File", actions.sendFile, modifier = Modifier.weight(1f), enabled = connected && !state.relayed)
+            Tile(R.drawable.ic_camera, "Camera", actions.openCamera, modifier = Modifier.weight(1f), enabled = connected && !state.relayed)
         }
+        if (connected && state.relayed) StatusLine("Files and the camera are off through the relay, to save data")
         state.transfer?.let { StatusLine(it) }
 
         if (settings.showPcStats && connected) state.pcStats?.let { PcPanel(it) }
